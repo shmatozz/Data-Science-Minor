@@ -1,0 +1,99 @@
+---
+title: "Анализ маркетинговой кампании"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(ggplot2)
+library(ggstatsplot)
+library(gridExtra)
+library(rpart)
+library(rpart.plot)
+
+marketing = read.csv("~/shared/minor2_2022/1-Intro/hw2/marketing_campaign.csv")
+
+marketing$Response = as.factor(marketing$Response)
+marketing$AcceptedCmp = as.factor(marketing$AcceptedCmp)
+marketing$Education = as.factor(marketing$Education)
+marketing$Marital_Status = as.factor(marketing$Marital_Status)
+
+marketing$Dt_Customer = lubridate::dmy(marketing$Dt_Customer)
+
+colnames(marketing)[2] = "Age"
+marketing = mutate(marketing, Age = 2014 - Age)
+
+marketing = mutate(marketing, TotalSpent = MntWines + MntFruits + MntMeatProducts + MntFishProducts + MntSweetProducts)
+# Удаление выбросов:
+marketing = marketing %>% filter(Age < 100 & Income < 600000)
+marketing = marketing %>% filter(TotalSpent > 250 | Income < 150000)
+```
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Распределение доходов и расходов респондентов
+
+```{r}
+a = ggplot() +
+  geom_histogram(data = marketing, aes(x = TotalSpent), bins = 6, color = "black", fill = "#00BF7D", alpha = 0.8) +
+  scale_x_continuous(breaks=seq(0,2500,by=500)) + 
+  ggtitle("Распределение расходов") +
+  ylab("Количество людей") +
+  xlab("Общие расходы за 2 года") +
+  theme_bw()
+
+b = ggplot() +
+  geom_histogram(data = marketing, aes(x = Income), color = "black", fill = "#D2691E", alpha = 0.8) + 
+  ggtitle("Распределение доходов") +
+  xlab("Доходы в год") +
+  ylab('') +
+  theme_bw()
+grid.arrange(a, b, ncol = 2, nrow = 1)
+```
+
+### Зависимость доходов и расходов респондентов
+
+```{r}
+ggscatterstats(data = marketing, x = TotalSpent, y = Income,
+               type = 'p', centrality.para = 'mean', marginal.type = 'histogram',
+               results.subtitle = FALSE,
+               title = 'Зависимость общих расходов от ежегодного дохода клиента',
+               xlab = 'Расходы',
+               ylab = 'Доходы',
+               ggtheme = ggplot2::theme_bw())
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Отклики на маркетинговые кампании
+
+```{r}
+ggplot() +
+  geom_bar(data = marketing, aes(x = AcceptedCmp, fill = Response), position = "fill", alpha = 0.8, color = 'black') + 
+  ggtitle("Отклики на маркетинговые компании") +
+  ylab('Доля людей') +
+  xlab('Предыдущая компания') + 
+  scale_x_discrete(labels = c("Не откликнулся", "Откликнулся")) + 
+  ggthemes::scale_fill_economist(name = "Новая компания", labels = c("Не откликнулся", "Откликнулся")) +
+  theme_bw()
+```
+
+
+### Из откликнувшихся на прошлую кампанию откликнулись на текущую
+
+```{r}
+t = table(marketing$Response, marketing$AcceptedCmp)
+valueBox(stringr::str_c(round(t[2, 2] / (t[1,2] + t[2,2]), 3) * 100, " %"), color = '#2FB6E2', icon = "fa-percent")
+```
+
+### Из не откликнувшихся на прошлую кампанию откликнулись на текущую
+
+```{r}
+valueBox(stringr::str_c(round(t[2,1]/ (t[1,1] + t[2,1]), 3) * 100, " %"), color = '#2FB6E2', icon = "fa-percent")
+```
