@@ -1,0 +1,199 @@
+
+
+GRAPH FROM DATA FRAME,  DEGREE,  CLOSENESS, FASTGREEDY, COR
+```{r}
+#загрузка библиотек
+library(igraph)
+library(readr)
+
+#загрузка датасета
+game_of_thrones <- read.csv("https://stepik.org/media/attachments/lesson/486016/game_of_thrones.csv")
+
+#создание igraph объекта
+got_net <- graph_from_data_frame(game_of_thrones, directed = FALSE)
+
+#нахождение количества связей для каждой вершины
+sort(closeness(got_net))
+#вывод вершины с 
+
+
+fastgreedy.community(got_net)
+
+cor(degree(got_net), closeness(got_net))
+```
+
+
+```{r}
+#загрузка библиотек
+library(igraph)
+
+#загрузка датасетов
+game_of_thrones1 <- read.csv("https://stepik.org/media/attachments/lesson/486016/game_of_thrones1.csv")
+game_of_thrones5 <- read.csv("https://stepik.org/media/attachments/lesson/486016/game_of_thrones5.csv")
+
+#создание igraph объекта
+got_net1 <- graph_from_data_frame(game_of_thrones1, directed = FALSE)
+got_net5 <- graph_from_data_frame(game_of_thrones5, directed = FALSE)
+
+#нахождение разницы в количестве связей для Daenerys-Targaryen в первой и пятой книгах
+degree(got_net5)["Daenerys-Targaryen"] - degree(got_net1)["Daenerys-Targaryen"]
+```
+
+
+============================================================================================
+
+
+
+```{r}
+#так как igraph и sna конфликтуют - мы отключаем sna (если у вас он был подключен)
+detach("package:sna")
+
+#загружаем пакет igraph
+library(igraph)
+```
+
+ASSORTATIVITY
+```{r}
+cheating <- as.matrix(read.csv("https://stepik.org/media/attachments/lesson/492370/cheating.csv"))
+attr2 <- read.csv("https://stepik.org/media/attachments/lesson/492370/attr2.csv", 
+                   stringsAsFactors = T)
+
+cheating = graph.adjacency(cheating)
+V(cheating)$GPA = attr2$GPA
+V(cheating)$org = attr2$organization
+V(cheating)$sex = attr2$sex
+mean(V(cheating)$GPA)
+
+assortativity(cheating, V(cheating)$GPA)
+
+assortativity_nominal(cheating, V(cheating)$org)
+assortativity_nominal(cheating, V(cheating)$sex)
+```
+
+
+PERMUTATIONS TEST
+```{r}
+number_of_permutations = 3500
+assortativity_shuffled  <- rep(NA, number_of_permutations)
+set.seed(17)
+for(i in 1:number_of_permutations){
+  V(cheating)$attr_shuffled = sample(V(cheating)$GPA, replace = F)
+  assortativity_shuffled[i] = assortativity(cheating, V(cheating)$attr_shuffled, directed = T)
+}
+
+q <- quantile(assortativity_shuffled, c(0.05, 0.95))
+q
+
+assortativity_real = assortativity(cheating, V(cheating)$GPA, directed = T)
+assortativity_real
+
+pvalue = sum(assortativity_shuffled >= assortativity_real) / number_of_permutations
+pvalue
+
+```
+
+GRAPH CORRELATION
+```{r}
+#загрузим библиотеки (функции пакетов sna и igraph пересекаются, поэтому отключим igraph)
+detach("package:igraph") 
+library(readr) 
+library(sna) 
+
+#загрузим датасеты
+febr23 <- read.csv("https://stepik.org/media/attachments/lesson/492370/febr23.csv") 
+march8 <- read.csv("https://stepik.org/media/attachments/lesson/492370/march8.csv")
+
+
+#создадим вектор имён
+boys <- c('a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t')
+girls <- c('a2','b2','c2','d2','e2','f2','g2','h2','i2','j2','k2','l2','m2','n2','o2','p2','q2','r2','s2','t2')
+
+
+#переименуем колонки и строки в соответствии с направленностью связи 
+colnames(march8) <- boys 
+rownames(march8) <- girls 
+
+colnames(febr23) <- girls 
+rownames(febr23) <- boys 
+
+gcor(febr23, march8, mode = "graph")
+```
+
+
+QAP TEST
+```{r}
+#для начала надо объединить наши датасеты в один объект, который мы скормим qaptest
+gifts <- list(febr23, march8)
+
+
+#теперь допишите код таким образом, чтобы получить результат
+
+set.seed(100)
+gifts.qap <- qaptest(gifts, gcor, g1=1, g2=2, reps=1000)
+summary(gifts.qap)
+
+#строим
+plot(gifts.qap)
+```
+
+=====================================================================================
+
+
+SHORTEST WAY
+
+```{r}
+shortest = routes_g_table %>% morph(to_shortest_path, from, to, weights = journey_time)
+
+shortest = shortest %>% mutate(selected_node = TRUE) %>% 
+  activate(edges) %>%
+  mutate(selected_edge = TRUE) %>% unmorph() %>%
+  activate(nodes) %>%
+  mutate(selected_node = ifelse(is.na(selected_node), 1, 2)) %>%
+  activate(edges) %>%
+  mutate(selected_edge = ifelse(is.na(selected_edge), 1, 2)) %>%
+  arrange(selected_edge)
+
+
+shortest %>% ggraph(layout = "kk") +
+  geom_edge_diagonal(aes(alpha = selected_edge), color = "gray") +
+  geom_node_text(aes(label = label, alpha = selected_node)) + 
+  theme_void() +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+sort(betweenness(as.matrix(routes_g_table)))
+```
+
+
+GROUP_EDGE_BETWEENNESS
+```{r}
+routes_g_table %>% mutate(community = group_edge_betweenness() %>% as.factor()) %>%
+  ggraph(layout = "kk") +
+  geom_edge_link(alpha = 0.3, show.legend = FALSE) +
+  geom_node_text(aes(colour = community, label = label), size = 3) + theme_graph()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
