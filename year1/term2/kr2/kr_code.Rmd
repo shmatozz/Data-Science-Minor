@@ -1,0 +1,115 @@
+
+Задание 6-7
+```{r}
+library(tidyverse)
+library(tidytext) 
+library(stopwords) 
+stopwords("ru") # используйте этот набор стоп-слов
+rustopwords = data.frame(words = stopwords("ru"))
+data = read.csv("https://stepik.org/media/attachments/lesson/683918/overheard.csv")
+
+data.tokens = data %>% unnest_tokens(words, content)
+data.tokens = data.tokens %>% anti_join(rustopwords)
+words_count = data.tokens %>% count(words) %>% arrange(-n)
+words_count
+```
+
+Задание 8
+```{r}
+path = "~/shared/minor2_2022/2-tm-net/"
+sentdict <- read.table(paste0(path,"lab08-sentiment/sentdict.txt"), header=T, stringsAsFactors=F) # словарь оценочной лексики
+data.sentiment = data.tokens %>% inner_join(sentdict)
+
+data.sentiment %>% group_by(discussed) %>% summarise(mean = mean(value))
+```
+
+Задание 9
+```{r}
+words_count = words_count %>% 
+  filter(n > quantile(words_count$n, 0.3) & n < quantile(words_count$n, 0.97))
+
+data.tidy = data.tokens %>% 
+  filter(words %in% words_count$words)
+
+n_distinct(data.tidy$words)
+n_distinct(words_count)
+```
+
+Задание 10
+```{r}
+words_new = words_count %>% 
+  filter(!str_detect(words, "[[:digit:]|[a-z]]"))
+
+data_tf_idf = data.tidy %>%
+  filter(words %in% words_new$words) %>%
+  dplyr::count(discussed, words) %>%
+  bind_tf_idf(words, discussed, n)
+
+data_tf_idf %>% filter(discussed == "low") %>% arrange(-tf_idf)
+```
+
+Задание 11
+```{r}
+load("~/shared/minor2_2022/data/mid2-2/lda_4.Rda")
+text_lda
+```
+Задание 12
+```{r}
+data_topics <- tidy(text_lda, matrix = "beta")
+data_topics %>% filter(topic == 1) %>% arrange(-beta)
+```
+
+Задание 13
+```{r}
+data_documents <- tidy(text_lda, matrix = "gamma")
+data_documents %>% filter(document == 961)
+```
+
+Задание 14
+```{r}
+library(tidyverse)
+library(tidytext) 
+library(stopwords) 
+rustopwords = data.frame(words = stopwords("ru"))
+data = read.csv("https://stepik.org/media/attachments/lesson/683918/overheard.csv")
+
+data.bigrams = data %>% 
+  unnest_tokens(bigram, content, token = "ngrams", n = 2)
+
+data.bifiltered = data.bigrams %>% 
+  separate(bigram, c("word1", "word2"), sep = " ") %>% 
+  dplyr::filter(!word1 %in% rustopwords$words) %>% 
+  dplyr::filter(!word2 %in% rustopwords$words)
+
+data.bifiltered %>% 
+  dplyr::select(word1, word2) %>% 
+  dplyr::count(word1, word2, sort = TRUE) %>%
+  filter(word1 == "утренний" & word2 == "чатик")
+```
+
+Задание 15
+```{r}
+data.bifiltered %>% 
+  filter(word1 == "привет" | word2 == "привет") %>% 
+  select(word1, word2) %>%
+  count(word1, word2, sort = TRUE)
+```
+
+Задание 16
+```{r}
+bigram.count = data.bifiltered %>% count(word1, word2) %>% arrange(-n )%>% top_n(20)
+
+library(igraph)
+
+bigram.net = graph_from_data_frame(bigram.count, directed = FALSE)
+
+bigram.net.coms = walktrap.community(bigram.net)
+member = factor(membership(bigram.net.coms))
+
+ggraph(bigram.net, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE) +
+  geom_node_point(aes(size = betweenness(bigram.net), color = member)) +
+  geom_node_text(aes(label = name), color = 'black', vjust = 1, hjust = 1) +
+  theme_void()
+
+```

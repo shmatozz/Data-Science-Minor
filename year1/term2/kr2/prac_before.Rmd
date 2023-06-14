@@ -1,0 +1,335 @@
+
+*Удаление слишком редких и частых слов*
+
+```{r}
+#удалим слишком редкие и наоборот, слишком распространенные
+words_count = words_count %>% 
+  filter(n > 5 & n < quantile(words_count$n, 0.95))
+
+reviews.tidy = reviews.tidy %>% 
+  filter(words %in% words_count$words)
+```
+
+*TF-IDF*
+
+```{r}
+# удалить отзывы от которых осталось мало слов
+reviews_count = reviews.tidy %>%
+    dplyr::count(id) %>%
+    filter(n > 5) 
+
+# для оставшихся отзывов посчитаем метрику TF-IDF
+reviews_tf_idf = reviews.tidy %>%
+    filter(id %in% reviews_count$id) %>%
+    dplyr::count(id, words) %>%
+    bind_tf_idf(words, id, n)
+```
+
+*ИЗ длинного в широкий формат*
+
+```{r}
+# приведем данные к широкому формату. создадим term-document matrix
+library(tidyr)
+reviews.tdm = reviews_tf_idf %>%
+    dplyr::select(id, words, tf_idf) %>%
+    pivot_wider(names_from = words, 
+                values_from = tf_idf, 
+                values_fill = 0) 
+```
+
+*Косинусное расстояние между двумя текстами*
+
+```{r}
+#посмотреть сами тексты отзывов
+reviews$review[reviews$id == "rn130827629"]
+reviews$review[reviews$id == "rn165157733"]
+
+review1 = reviews.tdm %>%
+    filter(id == "rn130827629") %>%
+    dplyr::select(-id) %>%
+    as.numeric()
+
+review2 = reviews.tdm %>%
+    filter(id == "rn165157733") %>%
+    dplyr::select(-id) %>% 
+    as.numeric()
+
+text = rbind(review1, review2)
+
+lsa::cosine(review1, review2)
+```
+
+*Загрузка словаря эмоциональности (4kin ,bing, afinn)*
+
+```{r}
+sentdict <- read.table(paste0(path,"lab08-sentiment/sentdict.txt"), header=T, stringsAsFactors=F) # словарь оценочной лексики
+bing_sent = get_sentiments("bing")
+afinn_sent = get_sentiments("afinn")
+```
+
+
+*Создание своего словаря*
+
+```{r}
+positive = reviews.sent %>%
+  filter(id %in% reviews$id[reviews$rating==5]) %>% 
+  mutate(sent = "positive")
+
+negative = reviews.sent %>% 
+  filter(id %in% reviews$id[reviews$rating<3]) %>% 
+  mutate(sent = "negative")
+
+reviews.pmi = bind_rows(positive, negative) %>% 
+  dplyr::select(-id,-value)
+
+reviews.pmi = reviews.pmi %>% 
+  dplyr::count(words, sent) %>% 
+  pivot_wider(names_from = sent, values_from = n, values_fill = 0)
+
+freq_p = reviews.pmi$positive
+freq_n = reviews.pmi$negative
+
+sum_p = sum(reviews.pmi$positive) 
+sum_n = sum(reviews.pmi$negative) 
+
+pmi_p = log((freq_p/sum_p)/((freq_p+freq_n)/(sum_p+sum_n)*sum_p/(sum_p+sum_n))+1)
+reviews.pmi$PMI_p = pmi_p
+
+pmi_n = log((freq_n/sum_n)/((freq_p+freq_n)/(sum_p+sum_n)*sum_n/(sum_p+sum_n))+1)
+reviews.pmi$PMI_n = pmi_n
+```
+
+
+*Построение модели LDA*
+
+```{r}
+reviews_tokens = reviews %>%
+  unnest_tokens(words, lem) %>% anti_join(rustopwords)
+
+word_counts <- reviews_tokens %>%
+  anti_join(stop_words, by=c("words"="word")) %>%
+  count(id, words, sort = TRUE) %>%
+  ungroup()
+
+rewiew_dtm <- word_counts %>%
+  cast_dtm(id, words, n)
+
+review2_lda <- LDA(rewiew_dtm, k = 2, control = list(seed = 12345)) # k = кол-во тем
+review2_lda
+```
+
+*Получение списка слово-тема*
+
+```{r}
+review2_topics <- tidy(review2_lda, matrix = "beta")
+review2_topics
+```
+
+*Логарифм отношения вероятностей*
+
+```{r}
+beta_spread <- review2_topics %>%
+  mutate(topic = paste0("topic", topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic1 > .001 | topic2 > .001) %>%
+  mutate(log_ratio = log2(topic1 / topic2)) %>%
+  arrange(-log_ratio)
+
+head(beta_spread)
+```
+
+*Получение списка документ-тема*
+
+```{r}
+review2_documents <- tidy(review2_lda, matrix = "gamma")
+review2_documents
+```
+
+*n-граммы*
+
+```{r}
+reviews.bigrams = reviews %>% 
+  unnest_tokens(bigram, lem, token = "ngrams", n = 2)
+```
+
+*Разбиение биграмм на две и удаление стопслов*
+
+```{r}
+reviews.bifiltered = reviews.bigrams %>% 
+  separate(bigram, c("word1", "word2"), sep = " ") %>% 
+  dplyr::filter(!word1 %in% rustopwords$words) %>% 
+  dplyr::filter(!word2 %in% rustopwords$words) 
+```
+
+*Подсчёт втречаемости биграмм*
+
+```{r}
+reviews.bifiltered %>% 
+  dplyr::select(word1, word2) %>% 
+  dplyr::count(word1, word2, sort = TRUE)
+```
+
+*Объединение разделённой биграммы в один столбец*
+
+```{r}
+reviews.bigrams = reviews.bifiltered %>% 
+  unite(bigram, word1, word2, sep = " ")
+```
+
+*3-граммы*
+P.S. логика абсолютно такая же
+
+```{r}
+reviews.trigrams = reviews %>% 
+  unnest_tokens(trigram, lem, token = "ngrams", n = 3)
+
+reviews.trigrams %>% 
+  dplyr::count(trigram, sort = TRUE)
+
+reviews.bifiltered = reviews.trigrams %>% 
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>% 
+  filter(!word1 %in% stopwords::stopwords("ru")) %>% 
+  filter(!word2 %in% stopwords::stopwords("ru")) %>%
+  filter(!word3 %in% stopwords::stopwords("ru"))
+
+reviews.bifiltered %>% 
+  dplyr::select(word1, word2, word3) %>% 
+  dplyr::count(word1, word2, word3, sort = TRUE)
+
+reviews.bifiltered %>% 
+  filter(word1 == "ужасный") %>% 
+  dplyr::count(word1, word2,word3, sort=TRUE) %>%
+  dplyr::select(word1, word2,word3, n)
+
+reviews.bifiltered %>% 
+  filter(word2 == "центр") %>% 
+  dplyr::count(rating, word1, word3, sort=TRUE) %>% 
+  filter(rating>3)
+
+reviews.trigrams = reviews.bifiltered %>% 
+  unite(trigram, word1, word2,word3, sep = " ")
+```
+
+*Эмбединги*
+
+```{r}
+load(paste0(path, "lab10-embeddings/data/word_vectors.RDS"))
+source(paste0(path, "lab10-embeddings/emb.R"))
+
+newword = get_embeddings("paris") - get_embeddings("france") + get_embeddings("germany") 
+
+rownames(newword) = "new"
+head(newword)
+```
+
+*Сравнивание 2 слов по*
+
+```{r}
+sim2(x = get_embeddings("berlin"),
+     y = newword,
+     method = "cosine",
+     norm = "l2"
+    )
+```
+
+*Нахождение близких слов*
+
+```{r}
+find_close_words(newword)
+find_close_words("berlin")
+```
+
+*Мнооооого про doc2vec*
+
+```{r}
+path = "~/shared/minor2_2022/2-tm-net/lab10-embeddings/data/"
+hse1 = read.delim(paste0(path, 'hse_about.txt'), header = F) %>% 
+  summarise(text = str_c(V1, collapse = " "), 
+            source = "hse1")
+
+hse2 = read.delim(paste0(path, 'hse_about2.txt'), header = F)%>% 
+  summarise(text = str_c(V1, collapse = " "), 
+            source = "hse2")
+
+msu = read.delim(paste0(path, 'msu_about.txt'), header = F)%>% 
+  summarise(text = str_c(V1, collapse = " "), 
+            source = "msu1")
+
+hermitage = read.delim(paste0(path, 'hermitage.txt'), header = F) %>% 
+  summarise(text = str_c(V1, collapse = " "), 
+            source = "hermitage")
+
+erarta = read.delim(paste0(path, 'erarta.txt'), header = F) %>% 
+  summarise(text = str_c(V1, collapse = " "), 
+            source = "erarta")
+
+univ_texts = hse1 %>% 
+  bind_rows(hse2) %>% 
+  bind_rows(msu) %>%
+  bind_rows(hermitage) %>%
+  bind_rows(erarta)
+```
+
+Разобьём текст на токены
+
+```{r}
+univ_tokens = univ_texts %>% 
+  unnest_tokens(output = words, input = text)
+```
+
+оставим только те слова, для которых у нас есть эмбеддинги
+
+```{r}
+dict = row.names(word_vectors)
+
+univ_tokens = univ_tokens %>% 
+  filter(words %in% dict) %>% 
+  unique()
+```
+
+Теперь для каждого слова посчитаем эмбеддинги и запишем их в колонку emb. Не забываем, что эмбеддинги -- это вектор из нескольких значений, поэтому, чтобы записать его в колонку, их нужно как-то "склеить"
+
+```{r}
+univ_embeddings = univ_tokens %>% 
+  rowwise() %>% # чтобы при дальнейшем подсчете эмбеддинга использовалось только текущее слово в строке
+  mutate(emb = str_c(get_embeddings(words), collapse = " ") )
+```
+
+и осталось только растащить вектора из одной колонки в 50
+
+```{r}
+univ_embeddings = univ_embeddings %>% 
+  separate(emb, into = as.character(c(1:50)), sep = " ")
+```
+
+дальше мы группируем слова по документу и считаем документ средним от его слов
+
+```{r}
+doc_emb = univ_embeddings %>%
+  select(-words) %>% 
+  group_by(source) %>% 
+  mutate_at(vars(-group_cols()), as.numeric) %>% 
+  summarise_all(mean) %>% 
+  column_to_rownames("source")
+```
+
+сравниваем косинусное расстояние между документами
+
+```{r}
+hse1 = doc_emb[1,] %>% as.numeric()
+hse2 = doc_emb[2,] %>% as.numeric()
+msu = doc_emb[3,] %>% as.numeric()
+hermitage = doc_emb[4,] %>% as.numeric()
+erarta = doc_emb[5,] %>% as.numeric()
+
+lsa::cosine(t(as.matrix(doc_emb)))
+```
+
+
+
+
+
+
+
+
+
