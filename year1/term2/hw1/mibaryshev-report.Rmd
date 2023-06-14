@@ -1,0 +1,325 @@
+---
+title: 'Взаимосвязи в компании: отчет'
+author: "Барышев Матвей, mibaryshev"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Загрузка данных
+
+```{r message = F}
+library(ggraph)
+library(igraphdata)
+library(igraph)
+library(stringr)
+data(enron) 
+library(lubridate)
+source("~/shared/minor2_2022/2-tm-net/hw/personalTask.R")
+start_date = hw_net_get_start_date()
+# определяем конечную точку месяца
+last_date = start_date + dmonths(1)
+time = as_date(as_datetime(E(enron)$Time))
+# убираем вершины раньше начальной точки и позже конечной
+net = enron %>% delete_edges(E(enron)[time < start_date | time > last_date])
+# убираем связи вершины самой с собой (согласно данным, иногда люди себя в копию ставят)
+net = simplify(net, remove.multiple = F)
+# убираем обособленные вершины
+net = net %>% delete_vertices(V(net)[degree(net) == 0])
+```
+
+Анализируются данные с `r start_date` по `r last_date`
+
+## Описание сети
+
+Данная сеть представляет собой данные о переписках 95 сотрудников в компании Enron в период с 1 июля 2000 года до 1 августа 2000 года.
+Сеть является направленной, потому что ребро обозначает отправленное письмо от отправителя к получателям.
+Всего в нашей сети 2775 рёбер. Следовательно, за данный период сотрудниками было отправлено 2775 писем.
+
+
+```{r}
+net
+```
+
+### Выявление значимых вершин
+
+Для начала выявим значимые вершины с помощью различных мер центральности.
+
+**Использованные меры центральности: degree centrality, betweenness centrality**
+
+1) степень вершин (degree centrality)
+
+Выделим на визуализации вершины с самой большой степенью.
+
+```{r, warning=FALSE, message=FALSE}
+ggraph(net) + 
+    geom_edge_link(color = "grey", alpha = 0.7) + 
+    geom_node_point(color = dplyr::case_when(degree(net) > 200 ~ "red", TRUE ~ "black"), 
+                    size = degree(net)/50, 
+                    alpha = dplyr::case_when(degree(net) > 200 ~ 0.9, TRUE ~ 0.5)) + 
+    geom_node_text(aes(label=Name, size = degree(net)/100), show.legend = FALSE, nudge_x = 0.1, nudge_y = 0.1, repel = TRUE)  +
+    theme_void()
+```
+
+Из данной визуализации можно сделать вывод, что Tana Jones отправлял(a) больше всех писем за данный период, также
+выделяются John Lavorate, David Delainey, Steven Kean и Mark Taylor. Можно предположить, что эти люди
+занимались распределением задач и осведомлением сотрудников.
+
+2) центральность по посредничеству (betweenness centrality)
+
+Выделим на визуализации вершины с самой большой центральностью по посредничеству.
+
+```{r, warning=FALSE, message=FALSE}
+ggraph(net) + 
+    geom_edge_link(color = "grey", alpha = 0.7) + 
+    geom_node_point(color = dplyr::case_when(betweenness(net) > 600 ~ "red", TRUE ~ "black"),
+                    size = betweenness(net)/70, 
+                    alpha = dplyr::case_when(betweenness(net) > 600 ~ 0.8, TRUE ~ 0.5)) + 
+    geom_node_text(aes(label=Name, size = betweenness(net)/100), show.legend = FALSE, nudge_x = 0.1, nudge_y = 0.1, repel = TRUE)  +
+  theme_void()
+```
+
+Из данной визуализации можно сделать вывод, что через сотрудника с именем John Lavorato
+через email проходило больше всего информации, так как его betweenness centrality самая большая.
+Также, большая центральность по посредничеству заметна у вершин близких к John Lavorato.
+Можно предположить, что эти люди обеспечивают связь между разными филиалами или отделами компании, так как через них
+проходят большинство кратчайших путей.
+
+
+3) показатель ассортативности
+
+Вычислим ассортативность для узлов нашей сети по занимаемой должности.
+
+```{r, warning=FALSE}
+vertices = data.frame(name = V(net)$Name, note = V(net)$Note)
+vertices = vertices %>% dplyr::mutate(note = str_extract(note, "[A-Za-z ]*[^,]"))
+vertices$note = ifelse(vertices$note == "NA", "Employee", V(net)$Note)
+
+assortativity_nominal(net, vertices$note, directed = T)
+```
+
+Получили ответ 0. Следовательно, работники нашей компании не имеют определённой тенденции в отправке писем.
+Сотрудники отправляют друг другу письма без привязки к определённой должности.
+
+### Выявление сообществ
+
+**Использованные меры выделения сообществ: edge betweenness community, walktrap community**
+
+В ходе анализа было использовано 2 алгоритма выявления сообществ: Girvan–Newman algorithm и Walktrap algorithm.
+Первый заключается в последовательном удалении связей в порядке убывания показателей битвидности ребер (edge betweenness scores), то есть числа кратчайших путей, проходящих по рассматриваемому ребру. А второй в случайном "блуждании" по графу.
+
+Сравнив полученные сообщества по модулярности, видно что разбиение по walktrap лучше.
+
+```{r, warning=FALSE, message=FALSE}
+coms_eb = edge.betweenness.community(net)
+coms_wt = walktrap.community(net)
+
+modularity(coms_eb)
+modularity(coms_wt)
+```
+
+Визуализируем полученные с помощью алгоритма Walktrap сообщества.
+
+```{r, warning=FALSE, message=FALSE}
+ggraph(net) + 
+    geom_edge_link(color = "grey", alpha = 0.7) + 
+    geom_node_point(color = membership(coms_wt), size = 4, alpha = 0.7) + 
+    geom_node_text(aes(label=Name, size = betweenness(net)/100), show.legend = FALSE, nudge_x = 0.1, nudge_y = 0.1, repel = TRUE)  +
+  theme_void()
+```
+
+Алгоритм Walktrap выделил в нашей сети 10 сообществ с достаточно хорошим показателем модулярности (0.65).
+Из данного разбиения можно сделать вывод, что в компании достаточно точно прослеживается разделение на сообщества.
+Возможно, полученное разбиение иллюстрирует разделение сотрудников на отделы или филиалы внутри компании. Из выше представленных расчётов
+и расположения на визуализации я могу предположить, что фиолетовое сообщество в центре графа относится к начальству компании, так как
+оно тесно связано практически со всеми остальными сообществами и в него входят вершины с высокой
+битвидностью.
+
+### Исследовательские вопросы
+
+**Вопрос 1: Правда ли, что руководство компании (CEO, President, Vice President) сосредоточенно в одном сообществе, включающем John Lavorato и находящемся по центру графа**
+
+Получим датасет из имён работников, их должности и выделенного сообщества.
+```{r}
+vertices = data.frame(name = V(net)$Name, note = V(net)$Note, community = membership(coms_wt)[])
+```
+
+Определим номер сообщества, в которое входит John Lavorato.
+```{r}
+head_community_number = vertices %>% dplyr::filter(name == "John Lavorato")
+head_community_number = head_community_number$community
+```
+
+Построим диаграмму распределения должностей в данном сообществе.
+```{r}
+vertices = vertices %>% dplyr::filter(community == head_community_number) %>% dplyr::filter(note != "NA")
+vertices = vertices %>% dplyr::mutate(note = str_extract(note, "[A-Za-z ]*[^,]"))
+
+ggplot(vertices) +
+  geom_bar(aes(note), color = "black", fill = "lightgreen") +
+  xlab("Должности") +
+  ylab("Кол-во сотрудников") +
+  ggtitle(str_c("Распределение должностей в сообществе №", as.character(head_community_number))) +
+  theme_bw()
+```
+
+Из данного графика видно, что в сообществе присутствует большое количество людей с высокими должностями, такими как
+CEO и Vice President. 
+
+Для наглядности стоит взглянуть на распределение должностей в других сообществах.
+
+```{r}
+vertices = data.frame(name = V(net)$Name, note = V(net)$Note, community = membership(coms_wt)[])
+vertices = vertices %>% dplyr::filter(note != "NA")
+vertices = vertices %>% dplyr::mutate(note = str_extract(vertices$note, "[A-Za-z ]*[^,]"))
+
+ggplot(vertices) +
+  geom_bar(aes(note), color = "black", fill = "lightgreen") +
+  xlab("Должности") +
+  ylab("Кол-во сотрудников") +
+  facet_wrap(vertices$community, scales = 'free_x', nrow = 5) +
+  theme_bw()
+```
+
+Из графиков распределения во всех сообществах можно заметить, что должность CEO не встречается ни в одном другом сообществе, а также в 6 сообществе людей с должностью
+Vice President заметно больше, чем в остальных.
+
+Следовательно, это правда, что руководство компании (CEO, President, Vice President) сконцентрировано в одном сообществе, включающем John Lavorato и находящимся по центру графа.
+
+
+**Вопрос 2: Правда ли, что сотрудники с высокой должностью отправляют и получают больше писем**
+
+Получим датасет из имён сотрудников, их должности, количеством отправленных, полученных и общем количеством писем.
+
+```{r}
+vertices = data.frame(name = V(net)$Name, note = V(net)$Note, send = degree(net, mode = "out"), get = degree(net, mode = "in"), total = degree(net))
+```
+
+Выполним преобразования и вычислим среднее количество писем для каждой должности.
+
+```{r}
+vertices = vertices %>% dplyr::filter(note != "NA")
+vertices = vertices %>% dplyr::mutate(note = str_extract(vertices$note, "[A-Za-z ]*[^,]"))
+stats = vertices %>% dplyr::group_by(note) %>% dplyr::summarise(mean_send = mean(send), mean_get = mean(get), mean_total = mean(total))
+```
+
+Теперь можно визуализировать полученные результаты для большей наглядности.
+
+```{r}
+ggplot(stats) +
+  geom_col(aes(x = mean_total, y = forcats::fct_reorder(note, mean_total)), color = "black", fill = "lightgreen") +
+  xlab("Среднее кол-во писем") + 
+  ylab("Должность в компании") +
+  ggtitle("Использование почты (total) к исполняемой должности") +
+  theme_bw()
+
+ggplot(stats) +
+  geom_col(aes(x = mean_send, y = forcats::fct_reorder(note, mean_send)), color = "black", fill = "lightgreen") +
+  xlab("Среднее кол-во писем") + 
+  ylab("Должность в компании") +
+  ggtitle("Использование почты (send) к исполняемой должности") +
+  theme_bw()
+
+ggplot(stats) +
+  geom_col(aes(x = mean_get, y = forcats::fct_reorder(note, mean_get)), color = "black", fill = "lightgreen") +
+  xlab("Среднее кол-во писем") + 
+  ylab("Должность в компании") +
+  ggtitle("Использование почты (recieve) к исполняемой должности") +
+  theme_bw()
+```
+
+Исходя из полученного результата, можно сделать вывод, что большего писем в компании отправляют и получают CEO.
+Следующими после них по количеству писем идут Vice President и President. У них средние ко-во писем примерно одинаковое.
+Также можно заметить, что со снижением значимости занимаемой должности снижается и количество
+отправляемых и получаемых писем.
+
+Следовательно, это правда, что количество отправляемых и получаемых электронных писем напрямую зависит от исполняемой должности.
+
+## Место сотрудника в сети
+
+```{r}
+hw_net_get_vertex(net)
+```
+**1) степень вершины**
+
+Определим степень вершины (количество отправленных и полученных писем) у сотрудника John Lavorato.
+```{r, message=FALSE}
+data.frame(name = V(net)$Name, degree = degree(net)) %>% dplyr::arrange(-degree) %>% dplyr::top_n(5)
+```
+
+Получили значение degree = 262. John Lavorato находится на 3 месте из 95 сотрудников по показателю degree. В данном контексте это показывает, что
+John Lavorato достаточно часто использует в своей работе электронную почту.
+
+**2) центральность по посредничеству**
+
+Определим значение битвидности у John Lavorato.
+```{r, message=FALSE}
+data.frame(name = V(net)$Name, betweenness = betweenness(net)) %>% dplyr::arrange(-betweenness) %>% dplyr::top_n(5)
+```
+
+Получили значение битвидности = 1376.3 и это самый больший показатель в нашей сети. Это означает, что через John Lavorato проходит наибольшее количество кратчайших путей
+от одного сотрудника до другого через электронную почту. Следовательно, через него проходит самый большой объём информации в компании.
+
+Также, значимость данной вершины просматривается на уже приведённой выше визуализации, на которой величина вершин соответствует показателю битвидности. Вершина “John Lavorato”
+является самой крупной и находится в центре графа.
+
+```{r, message= FALSE}
+ggraph(net) + 
+    geom_edge_link(color = "grey", alpha = 0.7) + 
+    geom_node_point(color = dplyr::case_when(V(net)$Name == "John Lavorato" ~ "red", TRUE ~ "black"),
+                    size = betweenness(net)/70,
+                    alpha = dplyr::case_when(V(net)$Name == "John Lavorato" ~ 0.9, TRUE ~ 0.4)) + 
+    geom_node_text(aes(label=Name,
+                       size = dplyr::case_when(V(net)$Name == "John Lavorato" ~ 5, TRUE ~ 1)), 
+                   show.legend = FALSE, nudge_x = 0.1, nudge_y = 0.1, repel = TRUE)  +
+  theme_void()
+```
+
+
+**3) идентификация сообщества**
+
+```{r}
+vertices = data.frame(name = V(net)$Name, note = V(net)$Note, send = degree(net, mode = "out"), get = degree(net, mode = "in"), community = membership(coms_wt)[])
+
+head_community_number = vertices %>% dplyr::filter(name == "John Lavorato")
+head_community_number = head_community_number$community
+vertices = vertices %>% dplyr::filter(community == head_community_number) %>% dplyr::filter(note != "NA")
+vertices = vertices %>% dplyr::filter(note != "NA") %>% dplyr::mutate(note = str_extract(vertices$note, "[A-Za-z ]*[^,]"))
+
+ggplot(vertices) +
+  geom_bar(aes(note), color = "black", fill = "lightgreen") +
+  xlab("Должность") + 
+  ylab("Кол-во сотрудников") +
+  ggtitle(str_c("Распределение должностей в сообществе №", as.character(head_community_number))) +
+  theme_bw()
+```
+
+Из данного графика можно сделать вывод, что John Lavorato находится в сообществе с людьми, исполняющими самые высокие должности в компании. Следовательно, John Lavorato тоже занимает высокую должность в компании.
+
+Это можно проверить, посмотрев атрибут вершины, советующий его должности.
+
+```{r}
+dplyr::filter(data.frame(name = V(net)$Name, note = V(net)$Note), name == "John Lavorato")
+```
+
+John Lavorato - CEO компании Enron America.
+
+## Общие выводы
+
+В процессе анализа сети email переписок сотрудников компании Enron были использованы различные меры центральности, ассортативность, несколько алгоритмов выделения сообществ, а также библиотеки для визуализации полученных результатов. 
+
+Во-первых, исходя из проведённого анализа можно сказать, что сотрудники компании достаточно часто используют электронную почту для коммуникации. Также, стоит заметить, что у сотрудников с высокой должностью прослеживается высокая центральность по посредничеству. Это можно легко объяснить тем, что сотрудники всегда должны осведомлять начальство о результатах своей работы, а начальство раздавать задания. Поэтому битвидность узлов растёт в соответствии с занимаемой должностью. 
+
+Во-вторых, в ходе анализа потока электронных писем удалось выявить 10 сообществ сотрудников с достаточно хорошим показателем модулярности. На визуализации сообществ видно, что распределены они достаточно равномерно и можно уверенно предположить, что полученные сообщества могут соответствовать реальному распределению сотрудников по командам, отделам или филиалам компании.
+
+В-третьих, на основе предоставленных данных удалось определить положение определённого сотрудника (John Lavorato) в организации с помощью мер центральности и распределения по сообществам. Высокие показатели degree и betweenness, а также распределение в сообщество с сотрудниками высоких должностей помогли выяснить, что John Lavorato является крайне важным и высокопоставленным сотрудником в компании Enron.
+
+
+
+
+
+
