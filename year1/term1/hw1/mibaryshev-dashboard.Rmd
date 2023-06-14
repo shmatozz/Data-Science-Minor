@@ -1,0 +1,110 @@
+---
+title: "Исследование данных об аэропортах"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(stringr)
+library(gridExtra)
+# загрузка данных, предобработка 
+
+source("~/shared/minor2_2022/1-Intro/hw1/hw1_data.R")
+
+airline = hw1_get_data(df_name = "airline")
+airport = hw1_get_data(df_name = "airport")
+lounge = hw1_get_data(df_name = "lounge")
+seat = hw1_get_data(df_name = "seat")
+
+airport$date = ymd(airport$date)
+airport$week_day = wday(airport$date, label = T)
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Распределение оценок пользователей для всех дней недели
+
+```{r}
+# самый важный график или таблица
+day_stat = airport %>% filter(!is.na(overall_rating)) %>% group_by(week_day) %>% summarise(avg = overall_rating)
+ggplot() + 
+  geom_boxplot(data = day_stat, aes(x = week_day, y = avg), size = 1, color = 'black') + 
+  xlab("День недели") +
+  ylab("Оценки аэропорта") +
+  ggtitle("Распределение оценок аэропортов по дням недели") +
+  theme_bw() + 
+  geom_boxplot(data = day_stat %>% filter(week_day == 'Sat' | week_day == 'Sun'), aes(x = week_day, y = avg), size = 1, color = 'black', fill = 'red')
+```
+
+### Средняя оценка пользователей для всех дней недели
+
+```{r}
+day_stat = airport %>% filter(!is.na(overall_rating)) %>% group_by(week_day) %>% summarise(avg = mean(overall_rating))
+
+ggplot() +
+  geom_point(data = day_stat, aes(x = week_day, y = avg), size = 8, color = 'black') +
+  xlab("День недели") +
+  ylab("Средний рейтинг аэропорта") +
+  ggtitle("Средний рейтинг аэропортов для каждого дня недели") +
+  geom_point(data = day_stat, aes(x = week_day, y = avg), size = 6, color = 'white') +
+  geom_point(data = filter(day_stat, week_day == "Sat" | week_day == "Sun"), aes(x = week_day, y = avg), size = 6, color = 'red') +
+  theme_bw()
+```
+
+Column
+-----------------------------------------------------------------------
+
+### Исследование отзывов на аэропорты
+
+```{r}
+with_busines = select(lounge, airport, lounge_type, recommended) %>% 
+  filter(lounge_type == 'Business Class' & !is.na(airport))
+with_busines$airport = tolower(with_busines$airport) %>% str_replace_all(' ', '-')
+with_business = select(airport, airport_name, recommended) %>% 
+  filter((airport_name %in% with_busines$airport) & !is.na(airport_name))
+with_business$recommended = as.factor(with_business$recommended)
+
+with_no_business = select(airport, airport_name, recommended) %>% 
+  filter(!(airport_name %in% with_business$airport) & !is.na(airport_name))
+with_no_business$lounge_type = 'No Business Class'
+with_no_business$recommended = as.factor(with_no_business$recommended)
+
+a = ggplot() +
+  geom_bar(data = with_business, aes(x = recommended), alpha = 1, fill = 'white', color = 'black', size = 1) +
+  xlab('Рекомендуют') +
+  ylab('Количество') +
+  scale_x_discrete(labels = c("0" = "Нет", "1" = "Да")) +
+  ggtitle('С бизнес-лаунжом') + 
+  scale_y_continuous(breaks = seq(0, 450, 50)) +
+  geom_bar(data = filter(with_business, recommended == '1'), aes(x = recommended), alpha = 1, fill = 'red', color = 'black', size = 1) + theme_bw()
+
+b = ggplot() +
+  geom_bar(data = with_no_business, aes(x = recommended), alpha = 1, fill = 'white', color = 'black', size = 1) +
+  xlab('Рекомендуют') +
+  ylab('Количество') +
+  scale_x_discrete(labels = c("0" = "Нет", "1" = "Да")) +
+  ggtitle('Без бизнес-лаунжа') + 
+  scale_y_continuous(breaks = seq(0, 450, 50)) +
+  geom_bar(data = filter(with_no_business, recommended == '1'), aes(x = recommended), alpha = 1, fill = 'red', color = 'black', size = 1) + theme_bw()
+grid.arrange(a, b, ncol = 2)
+```
+
+
+### Процент рекомендательных отзывов на аэропорты с бизнес-лаунжом
+
+```{r}
+valueBox(str_c(round(nrow(filter(with_business, recommended == '1')) / nrow(with_business), 3) * 100, " %"), color = 'red', icon = "fa-percent")
+```
+
+### Процент рекомендательных отзывов на аэропорты без бизнес-лаунжа
+
+```{r}
+valueBox(str_c(round(nrow(filter(with_no_business, recommended == '1')) / nrow(with_business), 3) * 100, " %"), color = 'red', icon = "fa-percent")
+```

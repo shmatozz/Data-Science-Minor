@@ -1,0 +1,211 @@
+---
+title: 'HW 1: Исследование данных об аэропортах'
+author: "Барышев Матвей, mibaryshev"
+output: html_document
+---
+
+## Задача
+
+на основе данных (и выданных вопросов) постараться выяснить:
+
+* какие проблемы есть в авиаперевозках
+* какие улучшения можно предложить на основе выводов по данным
+
+#### Загрузка данных и преобразование
+
+```{r message = FALSE, warning=FALSE, echo = F}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(stringr)
+library(gridExtra)
+
+source("~/shared/minor2_2022/1-Intro/hw1/hw1_data.R")
+
+airline = hw1_get_data(df_name = "airline")
+airport = hw1_get_data(df_name = "airport")
+lounge = hw1_get_data(df_name = "lounge")
+seat = hw1_get_data(df_name = "seat")
+
+hw1_get_questions()
+```
+
+В таблице airport столбец date был приведён к типу Date и добавлен столбец
+week_day обозначающий день недели.
+
+```{r echo=FALSE, message=FALSE}
+# преобразование данных, предобработка
+airport$date = ymd(airport$date)
+airport$week_day = wday(airport$date, label = T)
+
+```
+
+
+### Вопросы
+
+#### Вопрос 1
+
+**Вопрос:** Пишут ли люди более добрые отзывы на аэропорты в выходные (доброту определяем через overall_rating).
+
+**Данные:** для ответа на вопрос нужны таблицы airport.
+
+```{r echo=FALSE, message=FALSE}
+# код для ответа на вопрос 1:
+# нужные преобразования, построение графика, если нужен
+day_stat = airport %>% filter(!is.na(overall_rating)) %>% group_by(week_day) %>% summarise(avg = overall_rating)
+ggplot() + 
+  geom_boxplot(data = day_stat, aes(x = week_day, y = avg), size = 1, color = 'black') + 
+  xlab("День недели") +
+  ylab("Оценки аэропорта") +
+  ggtitle("Распределение оценок аэропортов по дням недели") +
+  theme_bw() + 
+  geom_boxplot(data = day_stat %>% filter(week_day == 'Sat' | week_day == 'Sun'), aes(x = week_day, y = avg), size = 1, color = 'black', fill = 'red')
+```
+
+```{r echo=FALSE, message=FALSE}
+day_stat = airport %>% filter(!is.na(overall_rating)) %>% group_by(week_day) %>% summarise(avg = mean(overall_rating))
+
+ggplot() +
+  geom_point(data = day_stat, aes(x = week_day, y = avg), size = 8, color = 'black') +
+  xlab("День недели") +
+  ylab("Средний рейтинг аэропорта") +
+  ggtitle("Средний рейтинг аэропортов для каждого дня недели") +
+  geom_point(data = day_stat, aes(x = week_day, y = avg), size = 6, color = 'white') +
+  geom_point(data = filter(day_stat, week_day == "Sat" | week_day == "Sun"), aes(x = week_day, y = avg), size = 6, color = 'red') +
+  theme_bw()
+```
+
+**Ответ:** Люди не пишут более добрые отзывы в выходные.
+
+**Вывод:** Исходя из проведённого анализа, можно увидеть, что в выходные дни люди пишут
+более негативные отзывы, чем в будни. А суббота вообще является самым негативным днём
+у пользователей. В дальнейшем стоит изучить негативные отзывы пользователей в дни с
+низкой средней оценкой и работать над исправлением проблем о которых пишут пользователи.
+
+
+#### Вопрос 2
+
+**Вопрос:** Пользователи каких стран чаще употребляют слово "good" (но не "not good") в отрицательных отзывах на лаунж-зоны? Т.е. находят что-то хорошее, но в целом не рекомендуют.
+
+**Данные:** для ответа на вопрос нужны таблицы lounge.
+```{r echo=FALSE, message=FALSE}
+# код для ответа на вопрос 2:
+# нужные преобразования, построение графика, если нужен
+lounge_not_recommended = filter(lounge, recommended == 0 & !is.na(author_country))
+lounge_not_recommended$content = tolower(lounge_not_recommended$content)
+lounge_not_recommended$content = str_replace_all(lounge_not_recommended$content, 'not good', '')
+
+ggplot() +
+  geom_col(data = lounge_not_recommended %>% group_by(author_country) %>% summarise(has_good = sum(str_detect(content, "good"))) %>%
+  arrange(-has_good) %>% head(n=5), aes(author_country, has_good), color = 'black', size = 1, width = 0.5) +
+  xlab("Страна автора") +
+  ylab("Кол-во отзывов со словом 'good'") +
+  ggtitle("Страны, в которых чаще всего употребляют 'good' в отзывах") +
+  theme_bw() +
+  geom_col(data = lounge_not_recommended %>% group_by(author_country) %>% summarise(has_good = sum(str_detect(content, "good"))) %>%
+  arrange(-has_good) %>% head(n=5), aes(author_country, has_good), color = 'black', size = 1, fill = 'white', width = 0.5) +
+  geom_col(data = lounge_not_recommended %>% group_by(author_country) %>% summarise(has_good = sum(str_detect(content, "good"))) %>%
+  arrange(-has_good) %>% head(n=2), aes(author_country, has_good), color = 'black', size = 1, fill = 'red', width = 0.5)
+```
+
+**Ответ:** Пользователи из Великобритании употребляют слово "good" (но не "not good") в отрицательных отзывах на лаунж-зоны чаще всех.
+Также пользователи из Австралии употребляют "good" довольно часто.
+
+**Вывод:** Возможно, пользователи из данных стран стараются быть более объективными, 
+более тщательно подходят к написанию отзыва и стараются выделять не только отрицательные аспекты, но и положительные.
+
+#### Вопрос 3
+
+**Вопрос:** Какие аэропорты рекомендуют чаще, те, в которых есть лаунжи бизнесс-класса, или те, в которых их нет?
+
+**Данные:** для ответа на вопрос нужны таблицы lounge, airport.
+
+```{r echo=FALSE, message=FALSE}
+# код для ответа на вопрос 3:
+# нужные преобразования, построение графика, если нужен
+with_busines = select(lounge, airport, lounge_type, recommended) %>% 
+  filter(lounge_type == 'Business Class' & !is.na(airport))
+with_busines$airport = tolower(with_busines$airport) %>% str_replace_all(' ', '-')
+with_business = select(airport, airport_name, recommended) %>% 
+  filter((airport_name %in% with_busines$airport) & !is.na(airport_name))
+with_business$recommended = as.factor(with_business$recommended)
+
+with_no_business = select(airport, airport_name, recommended) %>% 
+  filter(!(airport_name %in% with_business$airport) & !is.na(airport_name))
+with_no_business$lounge_type = 'No Business Class'
+with_no_business$recommended = as.factor(with_no_business$recommended)
+
+a = ggplot() +
+  geom_bar(data = with_business, aes(x = recommended), alpha = 1, fill = 'white', color = 'black', size = 1) +
+  xlab('Рекомендуют') +
+  ylab('Количество') +
+  scale_x_discrete(labels = c("0" = "Нет", "1" = "Да")) +
+  ggtitle('С бизнес-лаунжом') + 
+  scale_y_continuous(breaks = seq(0, 450, 50)) +
+  geom_bar(data = filter(with_business, recommended == '1'), aes(x = recommended), alpha = 1, fill = 'red', color = 'black', size = 1) + theme_bw()
+
+b = ggplot() +
+  geom_bar(data = with_no_business, aes(x = recommended), alpha = 1, fill = 'white', color = 'black', size = 1) +
+  xlab('Рекомендуют') +
+  ylab('Количество') +
+  scale_x_discrete(labels = c("0" = "Нет", "1" = "Да")) +
+  ggtitle('Без бизнес-лаунжа') + 
+  scale_y_continuous(breaks = seq(0, 450, 50)) +
+  geom_bar(data = filter(with_no_business, recommended == '1'), aes(x = recommended), alpha = 1, fill = 'red', color = 'black', size = 1) + theme_bw()
+grid.arrange(a, b, ncol = 2)
+```
+
+**Ответ:** Аэропорты, в которых есть бизнес-лаунж, рекомендуют чаще.
+
+**Вывод:** Из графиков видно, что наличие бизнес-лаунжа в аэропорту увеличивает шанс
+того, что пользователь порекомендует аэропорт. Количество рекомендаций на 
+аэропорты с бизнес-лаунжом в ~1.5 раза больше, чем на аэропорты без бизнес-лаунжа
+
+
+### Дэшборд
+
+Полученные выводы обобщены в виде дэшборда со следующими элементами 
+
+**Элемент 1:** 
+ - вид: график
+ - ответ на вопрос: 1
+ - обоснование: график в виде ящика с усами хорошо показывает распределение оценок
+ для каждого дня недели и можно легко увидеть, что в выходные дни, в целом, оценки
+ ниже.
+ 
+**Элемент 2:** 
+ - вид: график
+ - ответ на вопрос: 1
+ - обоснование: точечный график ярко отображает различия в средней оценке в каждый из
+ дней недели.
+ 
+**Элемент 3:** 
+ - вид: график
+ - ответ на вопрос: 3
+ - обоснование: из столбчатой диаграммы можно легко увидеть, что количество рекомендаций
+у аэропортов с бизнес-лаунжами больше, чем у аэропортов без него.
+ 
+**Элемент 4:** 
+ - вид: числа
+ - ответ на вопрос: 3
+ - обоснование: числа показывают соотношения рекомендательных отзывов к общему числу
+ аэропортов с/без бизнес-лаунжа.
+ 
+### Общие выводы
+
+Исходя из проведённых исследований, можно сделать вывод, что характер пользовательского
+отзыва может завесить от самых различных факторов. Во-первых, люди пишут разные отзывы в разные дни недели, причём
+в выходные дни рейтинг аэропортов может сильно проседать.
+Во-вторых, характер отзыва и стиль написания может меняться в зависимости от страны автора.
+Как оказалось, в Великобритании и Австралии живут более объективные люди, которые стараются
+подмечать как положительные, так и отрицательные аспекты в своих отзывах.
+В-третьих, наличие комфортной зоны ожидания бизнес-класса также влияет на отзывы
+пользователей. Из исследования видно, что аэропорты с лаунж зонами бизнес-класса
+рекомендуют в ~1.5 раза чаще.
+
+
+
+
+
+
+
