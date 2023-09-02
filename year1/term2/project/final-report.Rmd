@@ -1,0 +1,999 @@
+---
+title: "Итоговый проект"
+author: "Группа 3"
+output: 
+  html_document:
+    code_folding: hide
+---
+### Предобработка 
+
+Загрузка необходимых библиотек
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tidyverse)
+library(tidytext)
+library(igraph)
+library(ggraph)
+library(recommenderlab)
+```
+
+Загрузка данных
+
+```{r, message=FALSE, warning=FALSE}
+load("~/shared/minor2_2022/data/project/metadata_g_3.RData")
+load("~/shared/minor2_2022/data/project/ratings_g_3.RData")
+```
+
+#### Работа с исходным датасетом с названиями фильмов (metadata)
+
+Выделен год выхода фильма из названия в переменную y
+
+```{r, message=FALSE, warning=FALSE}
+n_last <- 5 
+metadata = metadata %>% mutate(y = substr(metadata$title, nchar(metadata$title) - n_last + 1, nchar(metadata$title)))
+metadata$y = str_sub(metadata$y, end = -2)
+metadata = metadata %>% mutate(title = str_sub(title, 0, nchar(title) - 7))
+metadata$y = as.numeric(metadata$y)
+```
+
+Год фильма переведён в пятилетия пронумерованные от 1 до 7
+
+```{r, message=FALSE, warning=FALSE}
+metadata = metadata %>% mutate(year = ifelse(y < 1995, 1, y))
+metadata = metadata %>% mutate(year = ifelse(y >= 1995 & y < 2000, 2, year))
+metadata = metadata %>% mutate(year = ifelse(y >= 2000 & y < 2005, 3, year))
+metadata = metadata %>% mutate(year = ifelse(y >= 2005 & y < 2010, 4, year))
+metadata = metadata %>% mutate(year = ifelse(y >= 2010 & y < 2015, 5, year))
+metadata = metadata %>% mutate(year = ifelse(y >= 2015 & y < 2020, 6, year))
+metadata = metadata %>% mutate(year = ifelse(y >= 2020, 7, year))
+metadata$year = as.numeric(metadata$year)
+```
+
+Удалён повторяющийся фильм
+
+```{r, message=FALSE, warning=FALSE}
+metadata = metadata %>% filter(title != "Gladiator")
+```
+    
+#### Сетевой анализ
+
+- Проведён анализ связи фильмов по тегам
+
+```{r, message=FALSE, warning=FALSE}
+survey_answers_text = survey_answers %>% left_join(tags, by=c("tag_id" = "id")) 
+tags_good = survey_answers_text %>% filter(score >= 3)
+
+films_with_tags = metadata %>% left_join(select(tags_good, item_id, tag), by="item_id") %>%
+  # отбираем только нужные колонки
+  select(title, avgRating, tag) %>%
+  # добавляем значения, чтобы потом заполнить широкую таблицу
+  mutate(values = case_when(is.na(tag) ~ 0, TRUE ~ 1))
+
+# фильтруем от NA
+films_with_tags = films_with_tags %>% filter(!is.na(tag))
+# создаём широкую таблицу
+films_with_tags_table = distinct(films_with_tags) %>% pivot_wider(names_from = tag, values_from = values, values_fill = 0)
+
+rownames = films_with_tags_table$title
+films_with_tags_table_sim = films_with_tags_table %>% dplyr::select(-title, -avgRating)
+rownames(films_with_tags_table_sim) = rownames
+sim = lsa::cosine(t(as.matrix(films_with_tags_table_sim)))
+
+films_tag_graph = graph_from_adjacency_matrix(sim, mode = "undirected", weighted = T, diag = F)
+
+V(films_tag_graph)$degree = degree(films_tag_graph) 
+films_tag_graph = delete.vertices(films_tag_graph, V(films_tag_graph)[degree < 2])
+
+fgcommune = fastgreedy.community(films_tag_graph)
+
+ggraph(films_tag_graph) + 
+    geom_edge_link(aes(alpha = weight), color = "grey", show.legend = FALSE) + 
+    geom_node_point(color = membership(fgcommune), 
+                    size = degree(films_tag_graph)/3, 
+                    alpha = dplyr::case_when(degree(films_tag_graph) > 10 ~ 0.9, TRUE ~ 0.5)) + 
+    theme_void()
+```
+
+
+В результате данного анализа получилась сеть наглядно демонстрирующая связь фильмов
+по тегам. При этом, выделение сообществ на полученной сети методом fast greedy показало
+высокий результат по модулярности. Это значит, что фильмы достаточно хорошо разделяются 
+на группы по тегам. Результаты данного анализа были использованы в дальнейшем в построение CB системы
+      
+---
+
+- Проведён анализ связи фильмов по актёрам
+
+```{r, message=FALSE, warning=FALSE}
+metadata_parse_actors = metadata %>% separate_rows(starring, sep = ", ",convert = TRUE)
+
+metadata_parse_actors_table = metadata_parse_actors %>% filter(str_detect(starring, "[a-zA-Z]")) %>%
+  # отбираем только нужные колонки
+  select(title, starring) %>%
+  # добавляем значения, чтобы потом заполнить широкую таблицу
+  mutate(values = case_when(is.na(starring) ~ 0, TRUE ~ 1))
+
+# создаём широкую таблицу
+metadata_parse_actors_table = distinct(metadata_parse_actors_table) %>% pivot_wider(names_from = starring, values_from = values, values_fill = 0)
+
+# переносим столбец title в названия строк
+rownames = metadata_parse_actors_table$title
+metadata_parse_actors_table_sim = metadata_parse_actors_table %>% dplyr::select(-title)
+rownames(metadata_parse_actors_table_sim) = rownames
+# получаем матрицу похожести
+actors_sim = lsa::cosine(t(as.matrix(metadata_parse_actors_table_sim)))
+
+films_actors_graph = graph_from_adjacency_matrix(actors_sim, mode = "undirected", weighted = T, diag = F)
+
+V(films_actors_graph)$degree = degree(films_actors_graph) 
+films_actors_graph = delete.vertices(films_actors_graph, V(films_actors_graph)[degree == 0])
+
+fgcommune = fastgreedy.community(films_actors_graph)
+
+ggraph(films_actors_graph) + 
+    geom_edge_link(aes(alpha = weight), color = "grey", show.legend = FALSE) + 
+    geom_node_point(color = membership(fgcommune), 
+                    size = degree(films_actors_graph)/15, 
+                    alpha = dplyr::case_when(degree(films_actors_graph) > 200 ~ 0.9, TRUE ~ 0.5)) + 
+    theme_void()
+```
+
+В результате данного анализа получилась неразборчивая сеть с огромным количеством
+вершин (451) и рёбер (3478). Выделение сообществ на полученной сети методом fast greedy показало
+достаточно низкий результат по модулярности. На визуализации видно, что вершин действительно
+не имеют тенденции разбиваться на чёткие группы. Это значит, что разделение по актёром недостаточно хорошо
+подходит для поиска похожих фильмов. Было принято решение не использовать результаты данного анализа в дальнейшем
+
+#### Текстовый анализ
+
+При проведении текстового анализа мы будем использовать теги, так как на этапе сетевого анализа было выяснено, что анализ тегов достаточно актуален. Сначала создаем датасет, в котором будут теги, их оценки, id фильма, для которого оставлен тег, и id пользователя, который оставил тег. Сразу видно, что оценки оставлены далеко не для всех тегов
+
+```{r}
+tagsnew = full_join(tags, survey_answers, by = c("id" = "tag_id"))
+```
+
+Поскольку у каждого тега оценок несколько, найдем среднее по каждому тегу. Учитываем, что одни и те же теги могут быть у разных фильмов, поэтому группируем и по тегу, и по фильму
+
+```{r, message=FALSE, warning=FALSE}
+meantags = tagsnew %>% group_by(tag, item_id) %>% summarise(meanscore = mean(score))
+```
+
+Есть очень много тегов, для которых нет оценки того, подходят они к фильму или нет. Уберем все пропущенные значения в средней оценке тегов: мы не сможем доверять тем тегам, которые не оценили
+
+```{r, message=FALSE, warning=FALSE}
+meantags = meantags %>% drop_na(meanscore)
+```
+
+Так как оценка обозначает, насколько тег подходит к фильму, то есть смысл отфильтровать значения только с большой оценкой, то есть мы будем учитывать только те теги, которые достаточно подходят к фильмам. Сама оценка может быть от -1 до 5. Оставим только те теги, для которых средняя оценка >=3
+
+```{r, message=FALSE, warning=FALSE}
+meantags = meantags %>% filter(meanscore >= 3)
+```
+
+Получилось 339 тегов: из них некоторые одинаковые, но относятся к разным фильмам. Посчитаем, для скольких фильмов есть теги, с которыми можно работать - 163 фильма
+
+```{r}
+n_distinct(meantags$item_id)
+```
+
+Получилось достаточно много тегов. Проверим, есть ли среди них стоп-слова
+```{r, message=FALSE, warning=FALSE}
+library(stopwords)
+stopwords = data.frame(tag=stopwords("en"), stringsAsFactors=FALSE)
+meantags = meantags %>%
+    anti_join(stopwords)
+```
+
+Стоп-слов в нашем датасете не оказалось. Построим облако слов, чтобы наглядно понимать, какие теги встречаются чаще всего:
+
+```{r s1, fig.height=5, fig.width=10}
+library(wordcloud2)
+
+meantags.counts = meantags %>%
+    dplyr::count(tag, sort=TRUE) %>% 
+    top_n(50, n)
+
+wordcloud2(data = meantags.counts)
+```
+
+Мы видим по облаку слов, что часто встречаются такие теги как comedy, funny, action, sad, future, cute, sci-fi, animation. Некоторые из них похожи на эмоции, некоторые - на жанры. Это наблюдение пригодится при дальнейшем анализе
+
+```{r, message=FALSE, warning=FALSE}
+# Продублируем датасет meantags, чтобы в случае неудачи вернуться назад. Дальше будем работать с movietags
+movietags = meantags
+```
+
+Посмотрим, возможно ли привести слова в тегах к начальной форме. Для этого перейдем к лемматизации
+```{r}
+# Вызовем mystem
+tags.tmp <- system2("mystem", c("-c", "-l", "-d"), input = movietags$tag, stdout=TRUE) 
+
+# Результат представлен с различными разделителями (скобками и т.д.). Почистим полученный аутпут от лишних символов
+
+tags.lem <- str_replace_all(tags.tmp, "\\{([^}]+?)([?]+)?\\}", "\\1")
+
+movietags <- cbind(movietags, lemtag = tags.lem)
+```
+
+Так как всего тегов относительно немного и они маленькие, в них легко видны различия. Преобразуем некоторые теги так, чтобы, например, "alien invasion" и "aliens" считались за один и тот же тег: обозначают они все-таки одинаковые вещи
+
+```{r}
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "suspenseful", "suspense")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "surveillance", "survival")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "spying", "spy")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "spies", "spy")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "sexual", "sexuality")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "scifi", "sci-fi")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "sci fi", "sci-fi")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "pixar", "pixar animation")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "oscar (best picture)", "oscar")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "oscar (best actor)", "oscar")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "oscar (best foreign language film)", "oscar")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "father son relationship", "father-son relationship")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "fantasy world", "fantasy")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "distopia", "dystopia")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "alien invasion", "aliens")
+movietags$lemtag = replace(movietags$lemtag, movietags$lemtag == "action packed", "action")
+```
+
+Создаем матрицу: какой тег встречается в каком фильме (фильмы тут под id)
+
+```{r}
+tags.dtm = movietags %>%
+  group_by(item_id) %>%
+  dplyr::count(lemtag, sort=TRUE) %>%
+  cast_sparse(item_id, lemtag, n) %>% 
+  as.matrix()
+```
+
+По косинусу угла можем посмотрть, какие фильмы по тегам похожи. Так, например, фильм под id 48043 и фильм под id 68791 очень сильно друг на друга похожи. В целом мы видим, что многие фильмы совсем не похожи друг на друга
+
+```{r}
+cos = lsa::cosine(t(tags.dtm))
+```
+
+**Анализ мнений и оценок (sentiment analysis)**
+
+Сначала проведем анализ по встроенным словарям bing_sent и afinn_sent
+
+```{r}
+# Подгружаем встроенные словари
+bing_sent = get_sentiments("bing")
+afinn_sent = get_sentiments("afinn")
+```
+
+Посмотрим на оценочный характер тегов по словарю bing_sent
+
+```{r}
+bingtags = movietags %>% 
+  inner_join(bing_sent, by= c("lemtag" = "word"))
+```
+
+Получилось проанализировать немного тегов (всего 85 тегов, некоторые из которых одинаковые, но для разных фильмов). Посмотрим, какие встречаются чаще: положительные или отрицательные:
+
+```{r}
+ggplot() +
+  geom_bar(data = bingtags, aes(x = sentiment)) +
+ggtitle("Среди тегов больше негативных, чем позитивных (по словарю binn)")
+```
+
+Чаще теги имеют негативную окраску.
+
+Посмотрим на оценочный характер тегов по словарю afinn_sent
+
+```{r}
+afinntags = movietags %>% 
+  inner_join(afinn_sent, by= c("lemtag" = "word"))
+```
+
+Получилось проанализировать еще меньше тегов, чем с помощью словаря bing_sent (54). Посмотрим на распределение оценок: мы видим, что по этому словарю теги часто бывают и негативные, и позитивные
+
+```{r}
+ggplot() +
+  geom_bar(data = afinntags, aes(x = value)) +
+ggtitle("Распределение оценок тегов по словарю afinn")
+```
+
+Позитивность и негативность это хорошо, но для фильмов было бы полезно знать жанры, чтобы качественно их рекомендовать. Жанры мы из данных достать не можем, но можем достать эмоции, а это уже что-то похожее. На одном из прошлых этапов мы заметили, что часто теги похожи на эмоции, поэтому попробуем применить NRC Emotion Lexicon
+
+```{r, message=FALSE, warning=FALSE}
+nrc_sent = get_sentiments("nrc")
+nrctags = movietags %>% 
+  inner_join(nrc_sent, by= c("lemtag" = "word"))
+```
+
+Получилось проанализировать больше тегов, чем со словарями bing и afinn (178). Посмотрим на распределение эмоций. Опять же видим, что часто теги негативные, но уже распределенные по разным эмоциям
+
+```{r, message=FALSE, warning=FALSE}
+ggplot() +
+  geom_bar(data = nrctags, aes(x = sentiment)) +
+ggtitle("Распределение эмоций тегов по словарю NRC")
+```
+
+Создаем датасет, в котором есть все теги, которые можно использовать для предстазаний, с указанием всех нужных переменных: id пользователя/фильма/тега, оценка, сентимент
+
+```{r}
+tagsnew2 = tagsnew
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "suspenseful", "suspense")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "surveillance", "survival")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "spying", "spy")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "spies", "spy")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "sexual", "sexuality")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "scifi", "sci-fi")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "sci fi", "sci-fi")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "pixar", "pixar animation")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "oscar (best picture)", "oscar")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "oscar (best actor)", "oscar")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "oscar (best foreign language film)", "oscar")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "father son relationship", "father-son relationship")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "fantasy world", "fantasy")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "distopia", "dystopia")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "alien invasion", "aliens")
+tagsnew2$tag = replace(tagsnew2$tag, tagsnew2$tag == "action packed", "action")
+```
+
+```{r, message=FALSE, warning=FALSE}
+forwork = inner_join(nrctags, tagsnew2, by = c("tag", "item_id"))
+forwork = forwork %>% select(item_id, tag, sentiment, id, user_id, score)
+```
+
+Таким образом, результатом проведения текстового анализа стало определение эмоций для тегов, что будет использовано в дольнейшем при создании content-based рекомендательной системы
+
+### Коллаборативная фильтрация
+
+Сначала просто изучим данные: посмотрим максимальное количество фильмов, которые оценил один пользователь - 48
+
+```{r, message=FALSE, warning=FALSE}
+counts = ratings %>% count(user_id) 
+counts %>% top_n(5, n) %>% arrange(-n) %>% head(1)
+```
+
+Также посмотрим на распределение: сколько фильмов чаще всего оценивают люди. По гистограмме видно, что люди очень редко оценивают больше 20 фильмов
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(counts) + geom_histogram(aes(x = n))
+summary(counts$n)
+```
+
+Преобразуем данные к таблице в "широком" формате
+
+```{r}
+library(tidyr)
+rates = pivot_wider(ratings, names_from = item_id, values_from = rating)
+userNames = rates$user_id
+rates = select(rates, -user_id)
+```
+
+Преобразование таблицы данных в матрицу
+
+```{r, message=FALSE, warning=FALSE}
+rates = as.matrix(rates)
+rownames(rates) = userNames
+
+r = as(rates, "realRatingMatrix", strict = T)
+r
+```
+
+Создадим датасет, в котором можно будет смотреть, какие фильмы нравились людям, а какие - нет. Смотреть это можно по рейтингу, который пользователь поставил для тех фильмов, которые смотрел
+
+```{r}
+meta = full_join(metadata, ratings, by = "item_id")
+```
+
+**Похожесть по оценкам**
+
+Рассмотрим, например, похожесть первых 10 пользователей. Так, мы видим, что еть пользователи, которые похожи очень сильно (чем ближе значение в таблице к 1/чем насыщеннее цвет на графике, тем больше похожесть)
+
+```{r}
+similarity_users10 <- similarity(r[1:10, ], method = "cosine", which = "users")
+as.matrix(similarity_users10)
+```
+
+```{r}
+# То же самое можно представить в виде графика (heatmap)
+image(as.matrix(similarity_users10), main = "User similarity")
+```
+
+**Предварительная подготовка данных**
+
+Оставим только релевантные данные: нас интересуют фильмы с не менее 10 оценками и пользователи, поставившие не менее 5 оценок
+
+```{r, message=FALSE, warning=FALSE}
+ratings_movies <- r[rowCounts(r) > 5, colCounts(r) > 10]
+ratings_movies
+```
+
+Посмотрим на распределение средних оценок пользователей. По графику видно, что чаще всего средняя оценка пользователей находится между 3 и 4
+
+```{r, message=FALSE, warning=FALSE}
+average_ratings_per_user <- rowMeans(ratings_movies)
+ggplot()+geom_histogram(aes(x=average_ratings_per_user)) +
+ggtitle("Распределение средних оценок пользователей")
+```
+
+Мы понимаем, что система будет выдавать рекомендации не только тем, кто уже есть в базе, но и новым пользователям. Сразу пропишем, что будет выдаваться новым пользователям и тем, кто не подойдет под ограничения, которые мы установим при создании коллаборативных систем: новые фильмы (относительно недавно вышедшие, после 2015 года), с хорошим рейтингом - больше 3.7
+
+```{r}
+newfilmsrating5 = metadata %>% filter(y > 2015 & avgRating > 3.7)
+names_movies_user = newfilmsrating5$title
+names_movies_user
+```
+
+Разделим все наблюдения на тестовую (0,2) и обучающую (0,8) выборки. Чтобы всегда делилось одинаково, установим set.seed(42)
+
+```{r}
+set.seed(42)
+
+test_ind <- sample(1:nrow(ratings_movies), size = nrow(ratings_movies)*0.2)
+recc_data_train <- ratings_movies[-test_ind, ]
+recc_data_test <- ratings_movies[test_ind, ]
+```
+
+#### Построим модель по методу IBCF
+
+```{r}
+recc_model_ibcf <- Recommender(data = recc_data_train, method = "IBCF")
+```
+
+**Функция для IBCF**
+
+```{r}
+getFilmsIBCF = function(user){
+  user = as.character(user)
+  usernumber = ratings %>% filter(rating >= 3)
+  
+  if (user %in% usernumber$user_id) {
+    recc_predicted <- predict(object = recc_model_ibcf, newdata = recc_data_test, n = 10)
+    names(recc_predicted@items) = rownames(recc_data_test)
+    recc_user <- recc_predicted@items[[user]]
+    movies_user <- recc_predicted@itemLabels[recc_user]
+    names_movies_user <- metadata$title[match(movies_user, metadata$item_id)]
+    names_movies_user
+    
+  } else {
+    newfilmsrating5 = metadata %>% filter(y > 2015 & avgRating > 3.7)
+    names_movies_user = newfilmsrating5$title
+  }
+  names_movies_user
+}
+```
+
+Проверим, что функция работает (правильно ли выводятся данные). Подробный анализ примеров и их релевантность мы изучили в следующих разделах
+
+Посмотрим, что она выведет для пользователя, который действительно есть в датасете. Возьмем, например, человека под id 371959. Этот пользователь оценивал фильмы на хорошие оценки (>= 3) - и, действительно, все работает, ему рекомендуется индивидуальный набор фильмов
+
+```{r}
+getFilmsIBCF(371959)
+```
+
+А если пользователя в датасете нет? Выводится то, что мы задали ранее - недавно вышедшие фильмы с хорошим средним рейтингом
+
+```{r}
+getFilmsIBCF(111111)
+```
+
+А если пользователь оценивал фильмы так, что оценки получались ниже 3? Например, пользователь 769662. Тогда выводится то, что мы задали ранее - недавно вышедшие фильмы с хорошим средним рейтингом
+
+```{r}
+getFilmsIBCF(769662)
+```
+
+#### Построим модель по методу UBCF
+
+```{r}
+recc_model_ubcf <- Recommender(data = recc_data_train, method = "UBCF")
+```
+
+**Функция для UBCF**
+
+```{r}
+getFilmsUBCF = function(user){
+  user = as.character(user)
+  usernumber = ratings %>% filter(rating >= 3)
+  
+  if (user %in% usernumber$user_id) {
+    recc_predicted <- predict(object = recc_model_ubcf, newdata = recc_data_test, n = 10)
+    names(recc_predicted@items) = rownames(recc_data_test)
+    recc_user <- recc_predicted@items[[user]]
+    movies_user <- recc_predicted@itemLabels[recc_user]
+    names_movies_user <- metadata$title[match(movies_user, metadata$item_id)]
+    names_movies_user
+    
+  } else {
+    newfilmsrating5 = metadata %>% filter(y > 2015 & avgRating > 3.7)
+    names_movies_user = newfilmsrating5$title
+  }
+  names_movies_user
+}
+```
+
+Проверим, что функция работает (правильно ли выводятся данные). Подробный анализ примеров и их релевантность мы изучили в следующих разделах
+
+Посмотрим, что она выведет для пользователя, который действительно есть в датасете. Возьмем, например, человека под id 565566. Этот пользователь оценивал фильмы на хорошие оценки (>= 3) - и, действительно, все работает, ему рекомендуется индивидуал
+
+```{r}
+getFilmsUBCF(565566)
+```
+
+А если пользователя в датасете нет? Выводится то, что мы задали ранее - недавно вышедшие фильмы с хорошим средним рейтингом
+
+```{r}
+getFilmsUBCF(111111)
+```
+
+А если пользователь оценивал фильмы так, что оценки получались ниже 3? Например, пользователь 769662. Тогда выводится то, что мы задали ранее - недавно вышедшие фильмы с хорошим средним рейтингом
+
+```{r}
+getFilmsUBCF(769662)
+```
+
+**Оценивание рекомендации:** 
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(42)
+# ?evaluationScheme
+eval_sets <- evaluationScheme(data = ratings_movies, 
+                              method = "split",
+                              train = 0.8,
+                              given = 15,
+                              goodRating = 4)
+```
+
+**Оцениваем качество предсказания для IBCF модели**
+
+```{r}
+recc_predicted_ibcf = predict(
+  object = recc_model_ibcf,
+  newdata = getData(eval_sets, "known"),
+  n = 5,
+  type = "ratings")
+
+eval_accuracy_ibcf = calcPredictionAccuracy(
+  x = recc_predicted_ibcf,
+  data = getData(eval_sets, "unknown"),
+  byUser = F)
+
+eval_accuracy_ibcf
+```
+
+**Оцениваем качество предсказания для UBCF модели**
+
+```{r}
+recc_predicted_ubcf = predict(
+  object = recc_model_ubcf,
+  newdata = getData(eval_sets, "known"),
+  n = 5,
+  type = "ratings")
+
+eval_accuracy_ubcf = calcPredictionAccuracy(
+  x = recc_predicted_ubcf,
+  data = getData(eval_sets, "unknown"),
+  byUser = F)
+
+eval_accuracy_ubcf
+```
+
+**Вывод:** Так как показатели RMSE, MSE и MAE у модели IBCF намного меньше, чем у модели UBCF, то мы можем сделать вывод, что модель IBCF лучше. То есть мы будем использовать ее для рекомендаций
+
+### Content-based рекомендация
+
+**Использованные переменные**
+
+- год выхода
+- средний рейтинг
+- режисёры
+- теги
+- эмоция тегов
+
+**Основа подсчета схожести:** косинусное расстояние
+
+**Общая логика рекомендации:** Для начала была подготовлена таблица схожести фильмов по
+косинусному расстоянию. Подсчёт косинусного расстояния осуществлялся по вышеупомянутым переменным.
+Чем больше у фильмов выявилось одинаковых признаков в ходе анализа и предподготовки, тем косинусное расстояние между ними ближе к 1 (косинусное расстояние = 1 в случае если все признаки фильма полностью совпали)
+
+```{r, message=FALSE, warning=FALSE}
+# словарь nrc для сентимента
+nrc_sent = get_sentiments("nrc")
+
+# объединение текстового предстовление тегов с оценками на них и эмоции по nrc
+survey_answers_text = survey_answers %>% left_join(tags, by=c("tag_id" = "id")) %>% 
+  left_join(nrc_sent, by= c("tag" = "word"))
+
+# отбор подходящих тегов
+tags_good = survey_answers_text %>% filter(score >= 3)
+
+# создание широкой таблицы по режисёрам
+directed = metadata %>% select(title, directedBy) %>% separate_rows(directedBy, sep = ", ",convert = TRUE)
+
+works_count = directed %>% group_by(directedBy) %>% tally() %>% filter(n > 1)
+
+directed = directed %>% filter(directedBy %in% works_count$directedBy) %>% mutate(value = 1) %>%
+  pivot_wider(names_from = directedBy, values_from = value, values_fill = 0)
+
+# создаём широкую таблицу по сентименту
+sentiment = tags_good %>% select(item_id, sentiment) %>% distinct() %>%
+  mutate(value = ifelse(is.na(sentiment), 0, 1)) %>%
+  pivot_wider(names_from = sentiment, values_from = value, values_fill = 0) %>% 
+  select(-"NA")
+
+# подготовка под широкую таблицу, добавляем нужные переменные, убираем не нужные
+films = metadata %>% left_join(tags_good, by="item_id") %>%
+  select(-tag_id, -user_id, -imdbId, -score, -starring, -sentiment) %>% 
+  mutate(values = case_when(is.na(tag) ~ 0, TRUE ~ 1)) # добавляем значения, чтобы потом заполнить широкую таблицу
+
+# создаём широкую таблицу по тегам
+films_table = distinct(films) %>% pivot_wider(names_from = tag, values_from = values, values_fill = 0) %>% select(-"NA")
+
+# объединяем в одну общую широкую таблицу
+films_table = films_table %>% left_join(directed, by='title') %>% left_join(sentiment, by='item_id')
+
+films_table[is.na(films_table)] = 0
+
+rownames = films_table$title
+films_table_sim = films_table %>% dplyr::select(-title, -directedBy, -item_id, -y)
+rownames(films_table_sim) = rownames
+films_table_sim = lsa::cosine(t(as.matrix(films_table_sim)))
+diag(films_table_sim) = 0 # ноль на главной диагонали, чтобы фильм не был похож сам на себя
+```
+
+После построения данной таблици можно приступать к рекомендации. Система смотрит на то, какие фильмы пользователю
+понравились и рекомендует похожие из нашей матрицы схожести
+
+**Функция рекомендации для старых пользователей**
+
+Данная функция рекомендует фильмы пользователям, которые уже оценивали фильмы из нашего датасета
+
+Принцип работы:
+
+0) на вход функция принимает 1 аргумент - id пользователя
+1) получает все поставленые оценки пользователя на фильмы
+2) получает названия этих фильмов
+3) если у пользователя есть хорошие оценки (>= 4), то:
+    - выбирает 10 самых похожих фильмов из матрицы схожости
+    
+   eсли у пользователя нет хороших оценок, то:
+    - выбирает 10 самых НЕ похожих фильмов из матрицы схожости
+4) выбирает 1 самый подходящий для пользователя
+5) возвращает в качестве рекомендации название выбранного фильма
+
+```{r, message=FALSE, warning=FALSE}
+# функция CB рекомендации для старого пользователя
+recommend_film_CB = function(id) {
+  # получение оценённых userом фильмов
+  user = ratings %>% filter(user_id == id)
+  
+  # настройка рекомендации
+  user = user %>% left_join(select(metadata, title, item_id), by='item_id')
+  
+  # если у пользователя есть оценки >= 4 -> рекомендуем похожие фильмы
+  if (nrow(user %>% filter(rating >= 4)) > 0) {
+    # if liked films exist -> recommend similar
+    user = user %>% filter(rating >= 4 & !is.na(title))
+    simCut = films_table_sim[,as.character(user$title)]
+    mostSimilar = head(sort(simCut, decreasing = T), n = 10)
+  # если у пользователя нет хороших оценок -> рекомендуем не похожие на оценненые фильмы
+  } else {
+    user = user %>% filter(rating < 4)
+    simCut = films_table_sim[,as.character(user$title)]
+    mostSimilar = sort(simCut, decreasing = F)
+    mostSimilar = mostSimilar[mostSimilar > 0] %>% head(10)
+  }
+  # настройка закончена, можно рекомендовать
+  
+  a = which(simCut %in% mostSimilar, arr.ind = TRUE, useNames = T)
+  result = rownames(a)
+  index = arrayInd(a, .dim = dim(simCut))
+
+  result = rownames(films_table_sim)[index[,1]]
+  mostSimilar = data.frame(title = result, similar = simCut[index])
+
+  recommendation = mostSimilar %>% left_join(metadata) %>% select(title, similar) %>% arrange(-similar) %>% top_n(1)
+  
+  # в качестве результата возвращаем 1 самый подходящий фильм
+  recommendation$title
+}
+```
+
+**Функция рекомендации для новых пользователей**
+
+Данная функция рекомендует фильмы пользователям, которые ещё не оценили ни одного фильма из нашего датасета
+
+Принцип работы:
+
+0) на вход функция принимает 1 необязательный аргумент (по умолчанию = NA) - любимый фильм пользователя
+1) если пользователь НЕ указал любимый фильм или его нет в нашем датасете, то:
+    - в качестве рекомендации выдаётся один случайный фильм из топ-10 по рейтингу
+2) если пользователь указал любимый фильм и он есть в датасете, то:
+    - выбирается самый похожий на него из матрицы схожести
+3) возвращает в качестве рекомендации название выбранного фильма
+
+```{r, message=FALSE, warning=FALSE}
+# функция CB рекомендации для нового пользователя
+recommend_new_user_CB = function(favourite_film=NA) {
+  # если был передан любимый фильм и этот фильм есть в нашей базе -> рекомендуем похожие на него
+  if (!is.na(favourite_film) & favourite_film %in% metadata$title) {
+    simCut = films_table_sim[,favourite_film]
+    mostSimilar = head(sort(simCut, decreasing = T), 1)
+    recommendation = names(mostSimilar)
+  # если пользователь не ввёл любимый фильм -> рекомендуем случайный фильм из 10 лучших по рейтингу
+  } else {
+    recommendation = metadata %>% arrange(-avgRating) %>% head(10) %>% select(title)
+    recommendation = recommendation[sample(nrow(recommendation), 1),]
+  }
+  
+  recommendation
+}
+
+```
+
+
+**Оценивание рекомендации** 
+
+
+Система сontent-based рекомендации была проверена на адекватность
+
+Для нескольких пользователей были сгенерированы рекомендации по их предыдущим оценкам
+
+Далее были сравнены характеристики у оценённых фильмов и рекомендованного
+
+Пользователь с id = 910248:
+
+У данного пользователя есть фильмы с хорошими оценками. Следовательно, задача нашей системы была
+порекомендовать максимально похожие фильмы
+
+Характеристики уже оценённых фильмов:
+```{r, message=FALSE, warning=FALSE}
+id = 910248
+
+user = ratings %>% filter(user_id == id)
+user = user %>% left_join(select(metadata, title, item_id), by='item_id')
+user = user %>% filter(rating >= 4) %>% left_join(tags_good, by='item_id') %>% select(title, rating, tag)
+
+user_rate = films_table %>% filter(title %in% user$title) %>% dplyr::select(title, avgRating, directedBy, year) %>% left_join(user)
+user_rate %>% distinct() %>% tbl_df %>% print(n=20)
+```
+
+Характеристики полученной рекомендации:
+```{r, message=FALSE, warning=FALSE}
+rec = recommend_film_CB(id)
+rec_id = (films_table %>% filter(title == rec))$item_id
+
+rec_stats = films_table %>% filter(item_id == rec_id) %>% left_join(tags_good, by='item_id') %>% dplyr::select(title, avgRating, directedBy, year, tag)
+rec_stats %>% distinct() %>% tbl_df %>% print(n=20)
+```
+
+Исходя из полученной рекомендации, можно заметить, что рекомендованный фильм очень похож на фильмы из 
+прошлых оценок пользователя. До этого пользователь любил смотреть фильмы из жанра
+криминальный боевик и драма, а также ставил им высокие оценки. Следовательно наша система порекомендовала ему
+фильм очень похожий по тематике и стилю
+
+---
+
+Пользователь с id = 987334:
+
+У данного пользователя все фильмы оценены ниже 4, поэтому задача нашей системы была порекомендовать
+пользователю фильм максимально непохожий на уже оценённые
+
+Характеристики уже оценённых фильмов:
+```{r, message=FALSE, warning=FALSE}
+id = 987334
+
+user = ratings %>% filter(user_id == id)
+user = user %>% left_join(select(metadata, title, item_id), by='item_id')
+user = user %>% filter(rating < 4 ) %>% left_join(tags_good, by='item_id') %>% select(title, rating, tag)
+
+user_rate = films_table %>% filter(title %in% user$title) %>% dplyr::select(title, avgRating, directedBy, year) %>% left_join(user)
+user_rate %>% distinct() %>% tbl_df %>% print(n=20)
+```
+
+Характеристики полученной рекомендации:
+```{r, message=FALSE, warning=FALSE}
+rec = recommend_film_CB(id)
+rec_id = (films_table %>% filter(title == rec))$item_id
+
+rec_stats = films_table %>% filter(item_id == rec_id) %>% left_join(tags_good, by='item_id') %>% dplyr::select(title, avgRating, directedBy, year, tag)
+rec_stats %>% distinct() %>% tbl_df %>% print(n=20)
+```
+
+Исходя из сравнения признаков, можно заметить, что фильм из рекомендации максимально не сходится с фильмами из 
+прошлых оценок пользователя. Также, можно заметить, что до этого пользователь смотрел фильмы так или иначе относящиеся к боевикам
+и супергеройской тематике и ставил им низкие оценки. В свою очередь, наша система порекомендовала посмотреть
+семейную комедию, что крайне не сочетается с боевиками
+
+В общем и целом, полученные результаты не противоречат нашим представлениям и ожиданиям, а также являются вполне адекватными и аргументированными
+
+### Примеры
+
+#### Примеры collaborative filtering
+
+*Разбираем только только примеры для IBCF, тк эта система лучше работает на нашем датасете*
+
+**Вопрос:** Если бы был пользователь, которому нравятся фантастические/фэнтезийные фильмы, мелодрамы и драмы (например, мультфильмы, "Автостопом по Галактике", "Быть Джоном Малковичем", "Приведение"), то ему будет логично рекомендовать фильмы тоже про фантастику/фэнтези с элементами драмы
+*Ответ:* В датасете мы нашли пользователя, который любит подобные фильмы. Для такого пользователя рекомендация вывела несколько фэнтезийных мультфлимов, комедийных мелодрам и драм ("Мир Уэйна 2", "Тонкая красная линия", "Знакомство с родителями")
+
+```{r}
+getFilmsIBCF(371959)
+```
+
+---
+
+**Вопрос:** Если бы был пользователь, которому нравятся фантастические фильмы, боевики (такие как "Зомби по имени Шон", например, или "Кунг-Фу Панда"), то ему будет логично рекомендовать фильмы тоже про фантастику, боевик или схожие элементы
+*Ответ:* В датасете мы нашли пользователя, который любит подобные фильмы. Дальше мы порекомендовали ему фильм, согласно его предпостениям и оценкам. Ему явно рекомендуют супергеройские фильмы, в которых есть как и фантастика, так и элементы боевиков. Также явно выделяются "Форсаж", "Трансформеры"
+
+```{r}
+getFilmsIBCF(66515)
+```
+
+---
+
+#### Примеры content-based
+
+**Вопрос:** Какая будет рекомендация, если пользователь оценит фильмы с одинаковым жанром, но с противоположными оценками? (высоко и низко)
+
+*Ответ:* У нас есть пользователь, который высоко оценил драму & романтику & боевик, и при этом есть фильмы с теми же жанрами, оцененные низко. Рекомендательная система также выдаёт жанр, который был высоко оценён, несмотря на другую низкую оценку, поскольку первым делом он учитывает существование оценок больше 4х. Помимо прочего, система берет во внимание год выхода, рейтинг, режиссёров, теги, эмоции тегов, и старается порекомендовать фильм, максимально похожий на тот, который пользователь оценил высоко
+
+Для начала посмотрим на оценки выбранного пользователя (id = 336512)
+
+```{r, message=FALSE, warning=FALSE}
+id = 336512
+
+user_rates = ratings %>% filter(user_id == id) %>% left_join(metadata, by="item_id") %>%
+  select(user_id, rating, title)
+user_rates
+```
+
+Можно заметить, что пользователь высоко (>= 4) оценил фильм «Ed Wood» из жанра драма и биография. В то же время,
+он оценил фильм «Erin Brockovich» из тех же жанров на оценку 2
+
+Также, выбранный пользователь оценил «Men in Black (a.k.a. MIB)» на 2.5 и «Matrix, The» на 4, хотя
+оба этих фильма относятся к практически одинаковому набору жанров
+
+Получим рекомендацию
+
+```{r, message=FALSE, warning=FALSE}
+rec = recommend_film_CB(id)
+rec_id = (films_table %>% filter(title == rec))$item_id
+
+rec_stats = films_table %>% filter(item_id == rec_id) %>% left_join(tags_good, by='item_id') %>% dplyr::select(title, avgRating, directedBy, year, tag)
+rec_stats %>% distinct() %>% tbl_df %>% print(n=20)
+```
+
+Наша content-based рекомендательная система порекомендовала пользователю фильм "River Runs Through It, A" из жанра драма.
+Так произошло из-за того, что этот фильм оказался максимально похож на один из высоко оценённых пользователем фильмов. Ещё стоит отметить, что наша система не ориентируется на жанры фильма, так как они отсутствовали в исходном датасете
+
+---
+
+**Вопрос:** Новый пользователь указывает мультик
+
+*Ответ:* Наша система порекомендует новому пользователю, указавшему свой любимый мультик (если он есть в датасете),  самый похожий на него из матрицы схожести (где учитывается год, эмоция тега, режиссер и тп).  Таким образом, не обязательно, что Вам выпадет именно мультик, ведь для рекомендации этого может оказаться мало
+
+- Новый пользователь с любимым мультфильмом «Mulan»
+
+```{r, message=FALSE, warning=FALSE}
+rec <- recommend_new_user_CB("Mulan")
+rec
+```
+
+По нашей таблице схожести фильмов, максимально похожим на «Mulan» оказался «Mr. Holland's Opus». К сожалению, система не смогла порекомендовать пользователю мультфильм, потому что нашла более схожий фильм
+
+- Новый пользователь с любимым мультфильмом «Aladdin»
+
+```{r, message=FALSE, warning=FALSE}
+rec <- recommend_new_user_CB("Aladdin")
+rec
+```
+
+Пользователю с любимым фильмом «Aladdin» наша система предлагает посмотреть «Hercules». Эту рекомендацию можно считать вполне успешной, так как «Hercules» тоже является мультиком со стилем, похожим на стиль мульчтика «Aladdin».
+
+- Новый пользователь с любимым мультфильмом «Shrek 2»
+
+```{r, message=FALSE, warning=FALSE}
+rec <- recommend_new_user_CB("Shrek 2")
+rec
+```
+
+По нашей таблице схожести фильмов, максимально похожим на «Shrek 2» оказался «Space Jam». В данном случае системе также удалось порекомендовать пользователю мультфильм на основании того, что он указал в качестве любимого фильма мультик
+
+---
+
+**Вопрос:** Что порекомендует система пользователю, если ему понравился фильм "Поймай меня, если сможешь"? Я предполагаю, что система может порекомендовать другие фильмы Спилберга или фильмы 2002 года
+
+*Ответ:* Тут можно рассмотреть несколько сценариев того, что значит "понравился фильм":
+
+1) Пользователь уже был зарегистрирован в системе и высоко оценил (>= 4) «Поймай меня, если сможешь» на нашей платформе
+
+В качестве примера возьмём пользователя с id = 75529, который оценил фильм «Поймай меня, если сможешь» на 5, и попробуем порекомендовать ему что-нибудь
+
+```{r, message=FALSE, warning=FALSE}
+id = 75529
+
+rec <- recommend_film_CB(75529)
+rec
+```
+
+2) Пользователь является новым на нашем сервисе и указал «Поймай меня, если сможешь» как свой любимый фильм
+
+```{r, message=FALSE, warning=FALSE}
+rec <- recommend_new_user_CB("Catch Me If You Can")
+rec
+```
+
+Как можно увидеть, результаты рекомендации совпали. Это можно объяснить тем, что в первом случае система решила выбирать похожие фильмы именно по «Поймай меня, если сможешь», а не по любому другому высоко оценённому фильму у пользователя с id = 75529 и определила, что «Terminal, The» максимально похож на «Поймай меня, если сможешь». Во втором случае у системы не было вариантов из чего выбирать, и она просто выдала максимально похожий фильм на «Поймай меня, если сможешь»
+
+Тут стоит подметить, что с большой долей вероятности, вам не выпадут фильмы с одинаковым режиссёром, как в данном случае, потому что фильмов много, а режиссёров, снявших больше 1-2 фильмов очень мало. В то же время, схожесть по режиссёру может помочь нашей CB рекомендательной системе в критических случаях (практически все признаки совпали) определить максимально похожий фильм
+
+---
+
+#### Сценарий из draft
+
+**Вопрос:** Порекомендуйте что-нибудь пользователю, который высоко оценил самый старый фильм в данных
+
+*Ответ:* Для начала выберем самый старый фильм в данных
+
+```{r, message=FALSE, warning=FALSE}
+metadata %>% arrange(y) %>% select(item_id, title, y) %>% head(5)
+```
+
+В наших данных присутствует только год выхода, поэтому точно выбрать самый старый фильм невозможно. Возьмём в качестве самого старого фильм «Rocky V» (item_id = 2412)
+
+Найдём пользователей, которые высоко оценили «Rocky V»
+
+```{r, message=FALSE, warning=FALSE}
+ratings %>% filter(item_id == 2412) %>% arrange(-rating) %>% head(5)
+```
+
+У нас есть 1 пользователь с id = 118483, который оценил «Rocky V» на оценку 4.5, которая является достаточно высокой
+
+Попробуем порекомендовать полученному пользователю фильм с помощью content-based системы
+
+```{r, message=FALSE, warning=FALSE}
+recommend_film_CB(118483)
+```
+
+В качестве рекомендации получаем «Pursuit of Happyness, The». Это может не совсем соответствовать ожиданиям получить фильм похожий на «Rocky V», но в то же время это значит, что пользователь ставил высокие оценки и другим фильмам и среди них удалось найти лучшее соответствие и выдать данную рекомендацию
+
+### Выводы
+
+В ходе работы над проектом мы провели сетевой анализ: выяснили, что эффективнее всего анализировать теги. После этого мы провели текстовый анализ: посмотрели на общую эмоциональную окраску слов, распределение негативных-позитивных отзывов. Мы также присвоили словам определенные эмоции - впоследствии мы использовали это при создании content-based системы
+
+При создании коллаборативной фильтрации мы использовали как IBCF-подход, так и UBCF. В целом, рассматривая примеры, рекомендации получались неплохими: из 10 рекомендуемых фильмов около 6-7 обычно совпадают с тем, что можно было бы предложить. Но, тем не менее, случаются выбросы. Для новых пользователей в обеих моделях мы рекомендовали относительно недавно вышедшие фильмы (после 2015) с хорошим рейтингов (выше 3.7). После создания систем мы оценили их: по показателям RMSE, MSE и MAE лучше получилась система IBCF - ее и рекомендуем использовать
+
+Для создания content-based системы мы использовали результаты сетевого и текстового анализа. Так, если по коллаборативной фильтрации старым пользователям предлагается 10 фильмов, то при content-based системе мы рекомендуем один. Если пользователя в системе нет, то на вход принимается любой фильм - если он есть в системе, то выдается похожий, если нет - выдается случайный фильм из топ-10 по рейтингу
+
+После проведения анализа можно сказать следующее: кажется, что коллаборативная фильтрация в данном случае работает лучше. Это можно объяснить тем, что у нас очень маленький набор фильмов - всего 498 после очищения. Также в датасете мало переменных: были бы очень полезны полные отзывы, страны производства, указание длительности фильмов. Также интересно было бы посмотреть, меняются ли предпочтения пользователей от того, основан ли фильм на книге, есть ли у него сиквелы/приквелы и так далее. Еще мы заметили, что в некоторых фильмах либо не совсем точно указывается название: так, Человек-паук 2017 года называется "Untitled Spider-Man Reboot" - это явно может затруднить работу, например, для новых пользователей content-based систему ничего не выведет, если они введут реальное название. Также в некоторых фильмах неполных актерский состав, упускаются известные актеры
+
+В целом результаты нас удовлетворили: часто системы выдают релевантные рекомендации. Однако мы уверены, что их можно сделать гораздо лучше, если добавить дополнительные переменные, исправить существующие и добавить больше фильмов!
+
+### Ответы на вопросы peer review
+
+**Вопрос:** Так ли сильно влияет на точность системы год выхода фильма? Написано что для контент бейсд системы вы взяли именно эту переменную, а не переменную с десятилетием
+
+*Ответ:* Для content-based системы был взят год выхода фильма, разбитый на пятилетия, пронумерованные от 1 (1990-1994) до 7 (2000+).
+Для примера фильм "Один дома" (год выхода: 1990) относится к пятилетию 1, а фильм "Омерзительная восьмерка" (год выхода: 2015) отнисится к пятилетию 6
+
+**Вопрос:** Что делать, если я новый пользователь и моего любимого фильма нет в датасете?
+
+*Ответ:* Увы, но в таком случае вам будет рекомендован случайный фильм из топ-10 по рейтингу. В скором будущем наша база данных фильмов пополниться и сможем подобрать для вас фильм, похожий на ваш любимый
+
+**Вопрос:** Не понятна граница, когда пользователь считается тем, у кого нет хороших оценок
+
+*Ответ:* Хорошей считается оценка больше или равная 4
+
+**Вопрос:** Было представлено два варианта рекомендаций для новых пользователей (если я правильно поняла), не совсем понятно какой именно будет использоваться
+
+*Ответ:* В каждой системе представлен 1 вариант вывода рекомендаций для новых пользователей. Если в вопросе речь про коллаборативную фильтрацию: по оценкам мы решили, что IBCF лучше, в связи с этим будем использовать ее 
+
+**Вопрос:** Не очень поняла логику работы системы для нового пользователя. Немного непонятно объяснили ее
+
+*Ответ:* Для коллаборативной системы: если пользователя нет в системе, то ему рекомендуется список относительно недавно вышедших фильмов с высоким рейтингом. Это работает и для IBCF-системы, и для UBCF-системы. Про логику вывода для новых пользователей в content-based системе объяснено выше
+
+**Вопрос:** Из презентации я не очень понял: где в дальнейшем применялся текстовый и сетевой анализ?
+
+*Ответ:* После сетевого анализа мы выяснили, что лучше проводить анализ по тегам, а не по актерам, в связи с чем использовали теги в content-based системе. После текстового анализа вы выделили эмоции для тегов, что тоже использовали в content-based системе
+
+**Вопрос:** В cb вы рекомендуете всего-лишь 1 фильм? По коду вроде бы 3, а показываете 1. Это сбивает(
+
+*Ответ:* Нигде в коде/комментариях к коду не сказано, что мы рекомендуем 3 фильма. Везде отбирается 1 фильм с помощью head(n = 1)

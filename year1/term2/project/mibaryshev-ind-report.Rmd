@@ -1,0 +1,320 @@
+---
+title: "Индивидуальное задание по проекту"
+author: "Группа 3, mibaryshev"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tidyverse)
+library(tidytext)
+```
+
+
+### Задание 
+
+Индивидуальное задание: 
+
+```{r, message=FALSE, warning=FALSE}
+suppressMessages(source("~/shared/minor2_2022/2-tm-net/project/personalTaskProject.R"))
+get_project_ind_questions(login = "mibaryshev")
+```
+
+### Предыдущий код
+
+Для решения данного задания я возьму content-based рекомендацию, так как в нашем проекте не было реализовано
+метрик для оценки качества этой системы.
+
+Мне понадобится код предобработки и функция content-based рекомендации.
+
+```{r, message=FALSE, warning=FALSE}
+load("~/shared/minor2_2022/data/project/metadata_g_3.RData")
+load("~/shared/minor2_2022/data/project/ratings_g_3.RData")
+  
+# выделение года
+metadata = metadata %>% mutate(year = str_sub(title, nchar(title) - 4, nchar(title) - 1))
+metadata$year = as.numeric(metadata$year)
+
+# обрежем выделенный год
+metadata = metadata %>% mutate(title = str_sub(title, 0, nchar(title) - 7))
+
+# в ходе работы выяснелось, что существует 2 фильма с одинаковым названием
+# было прияно решение удалить оба фильма из рекомендации
+metadata = metadata %>% filter(title != "Gladiator")
+
+# сворачивание года по десятилетиям для выявления похожести по году 
+# 1990-1994   -> 1
+# 1995-1999   -> 2
+# 2000-2004   -> 3
+# 2005-2009   -> 4
+# 2010 - 2014 -> 5
+# 2015 - 2019 -> 6
+# 2020+       -> 7
+metadata = metadata %>% mutate(year = ifelse(year < 1995, 1, year))
+metadata = metadata %>% mutate(year = ifelse(year >= 1995 & year < 2000, 2, year))
+metadata = metadata %>% mutate(year = ifelse(year >= 2000 & year < 2005, 3, year))
+metadata = metadata %>% mutate(year = ifelse(year >= 2005 & year < 2010, 4, year))
+metadata = metadata %>% mutate(year = ifelse(year >= 2010 & year < 2015, 5, year))
+metadata = metadata %>% mutate(year = ifelse(year >= 2015 & year < 2020, 6, year))
+metadata = metadata %>% mutate(year = ifelse(year >= 2020, 7, year))
+
+# словарь nrc для сентимента
+nrc_sent = get_sentiments("nrc")
+
+# объединение текстового предстовление тегов с оценками на них
+survey_answers_text = survey_answers %>% left_join(tags, by=c("tag_id" = "id")) %>% 
+  left_join(nrc_sent, by= c("tag" = "word"))
+
+# отбор подходящих тегов
+tags_good = survey_answers_text %>% filter(score >= 3)
+
+# создаём широкую таблицу только с режисёрами
+directed = metadata %>% select(title, directedBy) %>% separate_rows(directedBy, sep = ", ",convert = TRUE)
+
+works_count = directed %>% group_by(directedBy) %>% tally() %>% filter(n > 1)
+
+directed = directed %>% filter(directedBy %in% works_count$directedBy) %>% mutate(value = 1) %>%
+  pivot_wider(names_from = directedBy, values_from = value, values_fill = 0)
+
+# создаём широкую таблицу по сентименту
+sentiment = tags_good %>% select(item_id, sentiment) %>% distinct() %>%
+  mutate(value = ifelse(is.na(sentiment), 0, 1)) %>%
+  pivot_wider(names_from = sentiment, values_from = value, values_fill = 0) %>% 
+  select(-"NA")
+
+# подготовка под широкую таблицу, добавляем нужные переменные, убираем не нужные
+films = metadata %>% left_join(tags_good, by="item_id") %>%
+  select(-tag_id, -user_id, -imdbId, -score, -starring, -sentiment) %>% 
+  mutate(values = case_when(is.na(tag) ~ 0, TRUE ~ 1)) # добавляем значения, чтобы потом заполнить широкую таблицу
+
+# создаём широкую таблицу
+films_table = distinct(films) %>% pivot_wider(names_from = tag, values_from = values, values_fill = 0) %>% select(-"NA")
+
+# объединяем в наши заготовки под матрицы схожести
+films_table = films_table %>% left_join(directed, by='title') %>% left_join(sentiment, by='item_id')
+films_table[is.na(films_table)] = 0
+
+rownames = films_table$title
+films_table_sim = films_table %>% dplyr::select(-title, -directedBy, -item_id)
+rownames(films_table_sim) = rownames
+films_table_sim = lsa::cosine(t(as.matrix(films_table_sim)))
+diag(films_table_sim) = 0 # ноль на главной диагонали, чтобы фильм не был похож сам на себя
+
+# функция CB рекомендации для старого пользователя
+recommend_film_CB = function(id) {
+  # получение оценённых userом фильмов
+  user = ratings %>% filter(user_id == id)
+  
+  # настройка рекомендации
+  user = user %>% left_join(select(metadata, title, item_id), by='item_id')
+  
+  # если у пользователя есть оценки >= 4 -> рекомендуем похожие фильмы
+  if (nrow(user %>% filter(rating >= 4)) > 0) {
+    # if liked films exist -> recommend similar
+    user = user %>% filter(rating >= 4 & !is.na(title))
+    simCut = films_table_sim[,user$title]
+    mostSimilar = head(sort(simCut, decreasing = T), n = 10)
+  # если у пользователя нет хороших оценок -> рекомендуем не похожие на оценненые фильмы
+  } else {
+    user = user %>% filter(rating < 4)
+    simCut = films_table_sim[,user$title]
+    mostSimilar = sort(simCut, decreasing = F)
+    mostSimilar = mostSimilar[mostSimilar > 0] %>% head(10)
+  }
+  # настройка закончена, можно рекомендовать
+  
+  if (nrow(user) == 1) {
+    return(names(mostSimilar[1]))
+  }
+  
+  a = which(simCut %in% mostSimilar, arr.ind = TRUE, useNames = T)
+  index = arrayInd(a, .dim = dim(simCut))
+
+  result = rownames(films_table_sim)[index[,1]]
+  mostSimilar = data.frame(title = result, similar = simCut[index])
+
+  recommendation = mostSimilar %>% left_join(metadata) %>% select(title, similar) %>% arrange(-similar) %>% top_n(1)
+  
+  # в качестве результата возвращаем 1 самый подходящий фильм
+  return(recommendation$title)
+}
+```
+
+
+### Решение
+
+Идея метрики соответствия актеров в фильмах будет следующая. Схожесть по актёрскому составу будем
+определять находя пересечения по актёрам с помощью косинусного расстояния. Чем ближе косинусное расстояние
+между двумя фильмами к 1, тем больше у них общих актёров.
+
+На выходе данная метрика будет возвращать именованный список, где:
+  
+  - имена - любимые фильмы пользователя 
+  - элементы - значения метрики для фильмов (от 0 до 1)
+  
+Хорошим предсказанием можно считать случай, когда получилось найти среди любимых фильмов пользователя хотя бы одно
+совпадение по актёрам с фильмом из рекомендации.
+
+План реализации функции вычисления метрики:
+
+0) На вход функции подаётся id пользователя.
+1) Отобрать фильмы, которые нравятся пользователю (где "нравится" - пользователь поставил оценку фильму >= 4.5.
+  
+   Если у пользователя не будет фильмов с высокими оценками, сразу вернуть ошибку.
+   
+2) Получить рекомендацию для пользователя.
+3) Получить список актёров для фильмов из списка любимых и рекомендации.
+4) Так как актёры записаны в одной строке, разделить их на несколько (1 актёр = 1 строка).
+5) Построить широкую таблицу по актёрам.
+6) Построить таблицу схожести по косинусному расстоянию.
+
+   Идея заключается в том, что косинусное расстояние будет больше, если у фильмов будет больше общих актёров.
+   Если косинусное расстояние = 1, то у фильмов идентичный актёрский состав.
+   Если косинусное расстояние = 0, то актёрский состав полностью различается.
+   
+7) Отобрать из полученной таблицы схожести по актёрам только строку с фильмом из рекомендации.
+8) Вернуть из функции именованный массив, в котором каждый элемент будет сходство рекомендованного
+фильма с каждым фильмом из списка любимых по актёрскому составу.
+
+```{r, message=FALSE, warning=FALSE}
+actors_diff_metric = function(id=NA) {
+  # отбираем любимые фильмы
+  user = ratings %>% filter(user_id == id & rating >= 4.5)
+  
+  # проверка на случай, что у пользователя нет любимых фильмов (с оценкой >= 4.5 или не передан любимый)
+  if (nrow(user) == 0) {
+    return(-1)
+  }
+    
+  # получаем рекомендацию для пользователя
+  recommendation = recommend_film_CB(id)
+  
+  # объединаям любимые фильмы с рекомендацией
+  user = user %>% left_join(metadata, by="item_id") %>%
+                  bind_rows(filter(metadata, title == recommendation)) %>%
+                  select(title, starring)
+  
+  # разбиваем стлобец с актёрами на несколько строк
+  user = user %>% separate_rows(starring, sep = ",",convert = TRUE) %>%
+      mutate(values = case_when(is.na(starring) ~ 0, TRUE ~ 1))
+  
+  # создаём широкую таблицу
+  user_actors_table = user %>% pivot_wider(names_from = starring, values_from = values, values_fill = 0)
+  
+  # переносим столбец title в названия строк
+  rownames = user_actors_table$title
+  user_actors_table_sim = user_actors_table %>% dplyr::select(-title)
+  rownames(user_actors_table_sim) = rownames
+  # получаем матрицу похожести
+  actors_sim = lsa::cosine(t(as.matrix(user_actors_table_sim)))
+  
+  # достаём из матрицы схожести только строку с рекомендацией
+  simCut = actors_sim[,recommendation]
+  # вырезаем из списка последний элемент (он всегда будет самой рекомендацией)
+  simCut = simCut[1:length(simCut) - 1]
+  
+  return(simCut)
+}
+```
+
+### Пример
+
+В качестве примеров работы решения будет рассмотрим несколько случаев.
+
+1) У пользователя **есть** любимые фильмы и среди них нашлось совпадение по актёрам с рекомендацией.
+
+Пользователь с id = 428764.
+```{r, message=FALSE, warning=FALSE}
+test_id = 428764
+```
+
+Рекомендация:
+```{r, message=FALSE, warning=FALSE}
+recommend_film_CB(test_id)
+```
+
+Результат вычисления метрики соответствия актеров в фильмах:
+```{r, message=FALSE, warning=FALSE}
+actors_diff_metric(test_id)
+```
+
+Как можно заметить, у пользователя 1 любимый фильм ("Bourne Supremacy, The"). При вычислении метрики получилось число
+отличное от нуля. Следовательно, у фильма из рекомендации и любимого фильма пользователя (id = 428764) есть общий(е) актёр(ы).
+Так как показатель метрики ~0.1, то скорее всего у фильмов 1-2 одинаковых актёра. 
+
+Данную рекомендацию можно считать хорошей.
+
+---
+
+2) У пользователя **есть** любимые фильмы, но среди них **не** нашлось совпадения по актёрам с рекомендацией.
+
+Пользователь с id = 694195.
+```{r, message=FALSE, warning=FALSE}
+test_id = 694195
+```
+
+Рекомендация:
+```{r, message=FALSE, warning=FALSE}
+recommend_film_CB(test_id)
+```
+
+Результат вычисления метрики соответствия актеров в фильмах:
+```{r, message=FALSE, warning=FALSE}
+actors_diff_metric(test_id)
+```
+
+Можно увидеть, что у пользователя (id = 694195) есть несколько любимых фильмов, но показатель
+метрики соответствия актеров у всех равен 0. Это значит, что актёрский состав фильма из рекомендации не
+пересекается ни с одним актёрским составом любимых фильмов пользователя.
+
+Данную рекомендацию можно считать сомнительной.
+
+---
+
+3) У пользователя **нет** любимых фильмов, поэтому невозможно посчитать совпадение по актёрам.
+
+Пользователь с id = 987334.
+```{r, message=FALSE, warning=FALSE}
+test_id = 987334
+```
+
+Рекомендация:
+```{r, message=FALSE, warning=FALSE}
+recommend_film_CB(test_id)
+```
+
+Результат вычисления метрики соответствия актеров в фильмах:
+```{r, message=FALSE, warning=FALSE}
+actors_diff_metric(test_id)
+```
+
+В данном примере алгоритму вычисления метрики не удалось найти у пользователя любимые фильмы,
+так как он ставил всем фильмам оценки ниже 4.5. Следовательно, не удалось посчитать метрику соответствия актеров и
+функция вернула значение -1, что означает ошибку.
+
+Данную метрику невозможно применить к данной рекомендации из-за нехватки данных.
+
+### Выводы
+
+В ходе работы над заданием удалось проанализировать различные идеи по реализации
+метрики соответствия актеров в фильмах и выделить наилучший метод решения. Я считаю,
+что итоговая идея реализации является самой оптимальной и информативной из всех рассмотренных и 
+полученную функцию можно будет успешно использовать в дальнейшем для определения качества рекомендации.
+
+Полученная метрика хорошо подходит для оценки рекомендации в случаях, когда у пользователя уже есть несколько любимых фильмов. 
+В то же время она будет абсолютно бесполезна если пользователь ещё не нашёл близкие себе по душе фильмы.
+
+Тут стоит подметить, что реализованная метрика не совсем уместна и применима именно к нашему методу рекомендации в данный момент,
+потому что мы никак не использовали актёрский состав в наших системах рекомендации фильмов, но в будущем, после улучшения
+наших систем путём добавления большего количества информации о фильмах, поможет определять качество рекомендации. Также,
+данная метрика может помочь другим командам, которые использовали в своих системах рекомендации актёрский состав фильмов.
+
+
+
+
+
+
