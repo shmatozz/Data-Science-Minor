@@ -15,4 +15,5 @@
     - [Контрольная работа 2](year1/term2/kr2)
     - [Проект](year1/term2/project)
 - [Второй год](year2)
-  - to be continued...
+  - [Первый семестр](year2/term1)
+    - [Контрольная работа 1](year2/term1/kr1)
