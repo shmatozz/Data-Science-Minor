@@ -1,0 +1,144 @@
+# Контрольная работа 19.10.2023
+
+
+Задание 18
+```{r}
+(840 + 1077) / (840 + 1077 + 476 + 378)
+```
+
+
+Задание 24
+```{r}
+0.20 * 0.3 + 0.64 * 0.3 + 0.67 * 0.4
+0.91 * 0.3 + 0.74 * 0.3 + 0.86 * 0.4
+0.92 * 0.3 + 0.33 * 0.3 + 0.45 * 0.4
+0.98 * 0.3 + 0.86 * 0.3 + 0.50 * 0.4
+```
+
+
+Задание 26
+```{r}
+students = read.csv("https://stepik.org/media/attachments/lesson/198534/students1.csv")
+students = students %>% mutate(sex = as.factor(students$sex))
+
+ins_model = logistic_reg() %>% 
+  fit(sex~age+G1+G2+G3, data = students)
+
+ins_model
+```
+
+
+Задание 27
+```{r}
+pred = predict(ins_model, new_data = students, type = "prob")
+
+students %>% 
+  cbind(pred) %>% 
+  roc_auc(sex, .pred_F)
+```
+
+
+Задание 28
+```{r}
+library(ISLR)
+data = Credit
+
+set.seed(7261)
+model = decision_tree(mode = "regression", engine = "rpart") %>%
+  fit(Balance ~ Income + Limit + Education + Age, data = data)
+
+vip:::vip.model_fit(model)
+```
+
+
+Задание 29
+```{r}
+DefaultD = read.csv("https://stepik.org/media/attachments/lesson/428986/Default2.csv", stringsAsFactors = T)
+set.seed(98272)
+ind = initial_split(DefaultD, prop = 0.75)
+train = training(ind)
+test = testing(ind)
+
+model = decision_tree(mode = "classification", engine = "rpart") %>%
+  fit(default ~ ., data = train)
+
+pred = predict(model, test)
+
+test = test %>% 
+  mutate(Prediction = pred$.pred_class)
+
+test %>% 
+  conf_mat(truth = default, estimate = Prediction) %>% summary()
+```
+
+
+Задание 30
+```{r}
+library(cluster.datasets)
+data(all.us.city.crime.1970)
+city = all.us.city.crime.1970
+rownames(city) = city$city
+
+city = city %>% dplyr::select(-city)
+
+city <- scale(city)
+set.seed(3746)
+km.out = kmeans(city, 3, nstart = 20)
+km.out
+```
+
+```{r}
+hc.complete = hclust(dist(city), method="average")
+
+plot(hc.complete,main="Average Linkage", xlab="", sub="", cex=.5, hang = -1)
+
+n.clust = 4
+hclusters = cutree(hc.complete, k = n.clust)
+
+table(hclusters)
+```
+
+
+Задание 32
+```{r}
+library(Ecdat)
+?Journals
+data(Journals)
+
+Journals = Journals %>% filter(society == "no")
+Journals = Journals %>% select(-society, -date1)
+
+data.pca <- prcomp(dplyr::select(Journals,-title, -pub, -field),
+                 center = TRUE,
+                 scale. = TRUE) 
+summary(data.pca)
+```
+
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

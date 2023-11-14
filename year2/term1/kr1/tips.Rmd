@@ -1,0 +1,225 @@
+
+*Week 1*
+
+Дерево решений (rpart)
+```{r}
+library(rpart)
+library(rpart.plot)
+fit <- rpart(Class ~ ., data = BreastCancer)
+rpart.plot::rpart.plot(fit, type = 5)
+```
+
+
+Дерево решений (tidymodels)
+```{r fig.width=12}
+library(tidymodels)
+
+# специфицируем тип модели ("правила")
+tree.breast <- decision_tree(mode = "classification")
+
+# обучаем на данных
+tree.breast <- tree.breast %>% 
+  fit(Class ~., data = BreastCancer)
+
+# рисуем
+rpart.plot(tree.breast$fit) 
+```
+
+
+Дерево решений (tidymodels, workflow)
+```{r}
+# второй вариант
+tree.breast <- decision_tree(
+  mode = "classification") %>%
+  set_engine("rpart")
+
+tree.wf <- workflow() %>%
+   add_formula(Class ~.) %>%
+   add_model(tree.breast) %>%
+   fit(BreastCancer)
+
+rpart.plot(tree.wf$fit$fit$fit)
+```
+
+
+Разделение train/test
+```{r message = F, warning=FALSE}
+set.seed(100) #You shoud put here your own number
+breast.split = initial_split(BreastCancer, prop = 0.8) # создаёт сплит-объект
+breast.train = training(breast.split) # преобразует информацию из сплита в актуальный датафрейм
+breast.test = testing(breast.split)
+```
+
+
+Предсказание и матрица соответствий (confusion matrix)
+```{r}
+predict(tree.wf, breast.train)
+
+breast.train %>% 
+  mutate(Prediction = predict(tree.wf, breast.train)$.pred_class) %>% 
+  conf_mat(truth = Class, estimate = Prediction) 
+```
+
+
+Accuracy, Recall = Sensitivity, Precision = Positive Predictive Value
+```{r}
+accuracy(breast.test, truth = Class, estimate = Prediction)
+yardstick::recall(breast.test, truth = Class, estimate = Prediction)
+yardstick::precision(breast.test, truth = Class, estimate = Prediction)
+```
+Или
+```{r}
+breast.test %>% 
+  conf_mat(truth = Class, estimate = Prediction) %>% summary()
+```
+
+
+Кросс-валидация
+```{r}
+tree.kfcross <- rsample::vfold_cv(breast.train, v = 10)
+```
+
+Строим модель с указанными параметрами (всегда -- только на обучающей выборке)
+```{r message = F, warning=F}
+library(tune)
+tree.tune = tune::tune_grid(tree.wf, resamples = tree.kfcross)
+tree.tune %>% 
+  collect_metrics()
+```
+
+Выбор лучшей из валидации и файналайз
+```{r}
+tree.best = tree.tune %>% select_best("accuracy")
+final_tree = finalize_model(tree.breast, tree.best)
+```
+
+
+*Week 2*
+
+Линейная регресия (Simple Linear Regression)
+```{r}
+lm.fit=lm(medv~lstat, data=Boston.train)
+summary(lm.fit)
+```
+
+
+RSS MSE RMSE
+```{r}
+lm.test.RSS = sum((lm.predictions-Boston.test$medv)^2)
+lm.test.RSS
+
+lm.test.MSE = mean((lm.predictions-Boston.test$medv)^2)
+lm.test.MSE
+
+lm.test.RMSE = sqrt(lm.test.MSE)
+lm.test.RMSE
+```
+
+*Функция I() нужна для того, чтобы действительно произошло воведение в квадрат, т.к. символ ^ в формуле означает пересечение: (a + b)^2 = a + b + a:b*
+
+
+Логистическая регрессия (работает и с факторами!)
+```{r}
+log.model = glm(diabetes~., data = Diabetes.main, family = binomial(link = 'logit'))
+summary(log.model)
+
+log.model2 = glm(db~., data = Diabetes.main2, family = binomial(link = 'logit'))
+summary(log.model2)
+```
+
+Предсказания для логистической регрессии
+```{r}
+pred = predict(log.model, newdata = Diabetes.test, type = "response")
+```
+
+
+Обозначение границы
+```{r}
+pred0.5 <- factor(ifelse(pred > 0.5,"pos","neg"))
+```
+
+
+Confusion Matrix
+```{r}
+caret::confusionMatrix(pred0.5, Diabetes.test$diabetes)
+```
+
+
+ROC AUC
+```{r}
+library(pROC)
+ROCfull = roc(response = Diabetes.test$diabetes, predictor = pred)
+plot(ROCfull)
+plot(ROCfull, legacy.axes=T)
+pROC::auc(ROCfull)
+```
+или
+```{r}
+ins_train_binary %>% 
+  cbind(train_pred_class) %>% 
+  roc_auc(less10000, .pred_FALSE)
+```
+
+
+
+*Week 3*
+
+Кросс-валидация с workflow и тюном
+```{r, message=FALSE, warning=TRUE}
+set.seed(100)
+crossval <- vfold_cv(CaravanTrain, v = 5)
+set.seed(100)
+model <- decision_tree(mode = "classification",
+                       min_n = tune())#, engine = "C5.0")
+wf = workflow() %>% 
+  add_model(model) %>% 
+  add_formula(Purchase~.)
+tuning = tune_grid(wf, crossval)%>%
+  select_best("accuracy")
+final.tree = finalize_model(model, tuning)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
