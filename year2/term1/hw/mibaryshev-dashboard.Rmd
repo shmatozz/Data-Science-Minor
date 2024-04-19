@@ -1,0 +1,182 @@
+---
+title: "Отток клиентов интернет-магазина"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(DBI)
+library(ggplot2)
+library(plotly)
+library(dplyr)
+library(partykit)
+library(caret)
+library(tidymodels)
+library(vip)
+library(crosstalk)
+```
+
+```{r}
+con <- dbConnect(ClickHouseHTTP::ClickHouseHTTP(), 
+                 user='studentminor', 
+                 password='DataMinorHSE!2023', 
+                 dbname='ecommerce', 
+                 host='rc1a-i6ui9dhblsq8rgdo.mdb.yandexcloud.net',
+                 port = 8443,
+                 https=TRUE,
+                 ssl_verifypeer=FALSE)
+
+dataChurn = dbGetQuery(con, "select Churn from useraccount")
+dataChurn = mutate(dataChurn, Churn = as.factor(Churn)) %>% count(Churn)
+
+dataTenure = dbGetQuery(con, "select Churn, Tenure from useraccount")
+dataTenure = mutate(dataTenure, Churn = as.factor(ifelse(Churn == '1', 'Yes', 'No'))) %>%
+             mutate(Tenure = as.numeric(Tenure)) %>%
+             na.omit() %>% 
+             filter(Tenure < 40)  # исключаем большие выбросы
+
+dataLowTenure = dbGetQuery(con, "select * from useraccount
+                                 where Tenure = '0' or Tenure = '1'")
+
+dbDisconnect(con)
+
+dataLowTenure = dataLowTenure %>% mutate(Complain = as.factor(Complain),
+                                         Churn = as.factor(ifelse(Churn == '1', 'Yes', 'No')),
+                                         Tenure = as.numeric(Tenure),
+                                         PreferredLoginDevice = as.factor(PreferredLoginDevice),
+                                         PreferredPaymentMode = as.factor(PreferredPaymentMode),
+                                         HourSpendOnApp = as.numeric(HourSpendOnApp),
+                                         CouponUsed = as.numeric(CouponUsed),
+                                         OrderCount = as.numeric(OrderCount),
+                                         DaySinceLastOrder = as.numeric(DaySinceLastOrder)) %>%
+                                  na.omit()
+
+set.seed(500)
+
+ind = createDataPartition(dataLowTenure$Churn, p = 0.8, list = F)
+train = dataLowTenure[ind,]
+test = dataLowTenure[-ind,]
+logreg = logistic_reg() %>% fit(Churn~. - CustomerID - CategoryID - Tenure, data = train)
+
+test2 = test
+test2$CashbackAmount[test2$Complain == "1"] = as.integer(test2$CashbackAmount[test2$Complain == "1"] * 1.2)
+test2$CouponUsed[test2$Complain == "1"] = test2$CouponUsed[test2$Complain == "1"] + 2
+
+test2$Complain[test2$Complain == "1"] = 
+  sample(c("1", "0"), 
+         size = length(test2$Complain[test2$Complain == "1"]),
+         replace = T, prob = c(0.6, 0.4))
+
+simChurn = predict(logreg, test2)$.pred_class
+
+simChurn = data.frame(simChurn) %>% group_by(simChurn) %>% 
+  summarise(n = length(simChurn)) %>%
+  mutate(title = simChurn, sim = "После")
+curChurn = test %>% group_by(Churn) %>% 
+  summarise(n = length(Churn)) %>%
+  mutate(title = Churn, sim = "До")
+
+data = curChurn %>% bind_rows(simChurn) %>% select(-Churn, -simChurn) %>%
+  mutate(sim = as.factor(sim))
+
+percentSave =  round(1 - (data %>% filter(sim == "После" & title == "Yes"))$n / 
+  (data %>% filter(sim == "До" & title == "Yes"))$n, 2) * 100
+
+sharedData = SharedData$new(data)
+```
+
+Параметры {.sidebar}
+-------------------------------------
+
+```{r}
+filter_select("status",
+              "До или после симуляции",
+              sharedData,
+              ~sim,
+              multiple = FALSE)
+```
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### Сравнение количества пользователей до и после симуляции решения
+
+```{r}
+plot_ly(sharedData) %>%
+  add_bars(y = ~n, x = ~title, name = "После",
+    orientation = 'v',
+    marker = list(color = "green",
+                  line = list(color = 'black', width = 1)),
+    opacity = 0.5,
+    transforms = list(list(type = "filter",
+                           target = ~sim,
+                           operation = "=",
+                           value = "После"))) %>%
+  add_bars(y = ~n, x = ~title, name = "До",
+    orientation = 'v',
+    marker = list(color = "red",
+                  line = list(color = 'black', width = 1)),
+    opacity = 0.5,
+    transforms = list(list(type = "filter",
+                           target = ~sim,
+                           operation = "=",
+                           value = "До"))) %>%
+  layout(
+    barmode = "group",
+    yaxis = list(title = "Количество клиентов"),
+    xaxis = list(title = "Клиент ушёл"))
+```
+
+### Пользователей, которые хотели уходить, удалось сохранить
+
+```{r}
+valueBox(stringr::str_c(percentSave, " %"), color = '#2FB6E2', icon = "fa-percent")
+```
+
+Column {data-width=500}
+-----------------------------------------------------------------------
+
+### Статистика длительности использования интернет-магазина
+
+```{r}
+ggplotly(          
+  ggplot(dataTenure, aes(x = Tenure, fill = Churn)) + 
+    geom_histogram(color = "black") + 
+    labs(title = "Распределение по времени использования", 
+         x = "Время использования (в месяцах)", 
+         y = "Количество пользователей",
+         fill = "Ушёл") + 
+    scale_fill_manual(values=c("gray", "skyblue"), labels = c("Нет", "Да")) +
+    theme_light()
+)
+```
+
+### Статистика жалоб у новых пользователей
+
+```{r}
+ggplotly(
+  ggplot(dataLowTenure, aes(x = Complain, fill = Churn)) + 
+    geom_bar(color = "black") +
+    labs(title = "Отношение оттока и жалоб", 
+         x = "Пользователь жаловался",
+         y = "Количество пользователей",
+         fill = "Ушёл") +
+    scale_fill_manual(values=c("gray", "skyblue"), labels = c("Нет", "Да")) +
+    scale_x_discrete(labels = c("Нет", "Да")) +
+    theme_light()
+) %>%
+  layout(
+    showlegend = TRUE,
+    legend = list(
+      traceorder = "normal",
+      title = list(text = "Ушёл"),
+      orientation = "v",
+      y = 0.5,
+      xanchor = "left",
+      yanchor = "middle"
+    )
+  )
+```

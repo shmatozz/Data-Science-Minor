@@ -1,0 +1,429 @@
+---
+title: 'Проект SQL: Анализ оттока пользователей интернет-магазина'
+author: "Барышев Матвей, mibaryshev"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+## Задача
+
+В данном проекте рассматривается задача анализа оттока пользователей интернет-магазина. 
+
+Основная цель работы заключается в выявлении причин оттока и анализе конкретных групп пользователей с наибольшим процентом прекращения использования данного сервиса. 
+
+Важной задачей является также поиск решения проблемы оттока пользователей, который будет проводиться путем рассмотрения наиболее интересных для анализа групп с целью выделения ключевых факторов, оказывающих наибольшее влияние на решение клиентов о завершении пользования магазином.
+
+Решение будет протестировано с использованием симуляции и представлено в виде отчета и интерактивного дэшборда.
+
+## Анализ
+
+### Данные и логика анализа
+
+Загружаем нужные библиотеки для работы с данными, моделями и графиками.
+```{r}
+library(DBI)
+library(ggplot2)
+library(plotly)
+library(dplyr)
+library(partykit)
+library(caret)
+library(tidymodels)
+library(vip)
+library(crosstalk)
+```
+
+Устанавливаем соединение с базой данных интернет-магазина.
+```{r}
+con <- dbConnect(ClickHouseHTTP::ClickHouseHTTP(), 
+                 user='studentminor', 
+                 password='DataMinorHSE!2023', 
+                 dbname='ecommerce', 
+                 host='rc1a-i6ui9dhblsq8rgdo.mdb.yandexcloud.net',
+                 port = 8443,
+                 https=TRUE,
+                 ssl_verifypeer=FALSE)
+```
+
+Рассмотрим структуру базы данных:
+
+Список доступных таблиц:
+```{r}
+dbListTables(con)
+```
+
+Поля таблицы "useraccount".
+```{r}
+dbListFields(con, "useraccount")
+```
+
+Поля таблицы "category".
+```{r}
+dbListFields(con, "category")
+```
+
+Поля таблицы "user".
+```{r}
+dbListFields(con, "user")
+```
+
+Посмотрим на распределение по оттоку в целом среди всех пользователей.
+```{r}
+dataChurn = dbGetQuery(con, "select Churn from useraccount")
+dataChurn = mutate(dataChurn, Churn = as.factor(Churn)) %>% count(Churn)
+
+plot_ly(
+  data = dataChurn,
+  x = ~Churn,
+  y = ~n,
+  type = "bar",
+  marker = list(
+    color = ifelse(dataChurn$Churn == "1", "skyblue", "gray"),
+    line = list(color = 'black', width = 1)
+  )
+) %>%
+  layout(
+    title = "Распределение по оттоку",
+    xaxis = list(title = "Клиент ушел", tickmode = "array", tickvals = c(0, 1), ticktext = c("Нет", "Да")),
+    yaxis = list(title = "Количество пользователей")
+  )
+```
+
+Из полученного графика можем заметить, что процент оттока в интернет-магазине равен ~16%.
+
+
+Изучим статистику оттока по времени использования нашего магазина.
+```{r}
+dataTenure = dbGetQuery(con, "select Churn, Tenure from useraccount")
+dataTenure = mutate(dataTenure, Churn = as.factor(ifelse(Churn == '1', 'Yes', 'No'))) %>%
+             mutate(Tenure = as.numeric(Tenure)) %>%
+             na.omit() %>% 
+             filter(Tenure < 40)  # исключаем большие выбросы
+
+ggplotly(          
+  ggplot(dataTenure, aes(x = Tenure, fill = Churn)) + 
+    geom_histogram(color = "black") + 
+    labs(title = "Распределение по времени использования", 
+         x = "Время использования (в месяцах)", 
+         y = "Количество пользователей",
+         fill = "Ушёл") + 
+    scale_fill_manual(values=c("gray", "skyblue"), labels = c("Нет", "Да")) +
+    theme_light()
+)
+```
+
+Легко заметить, что подавляющее большинство пользователей уходит в самом начале пользования
+нашим магазином. Время использования у таких пользователей не превышает 1 месяц.
+
+Чтобы лучше изучить проблему, рассмотрим эту группу подробнее и попытаемся понять почему
+люди перестают делать заказы через данный интернет-магазин.
+
+Получим некоторую статистику новых и старых пользователей из базы данных.
+
+```{r}
+dataLowTenure = dbGetQuery(con, "select Complain, OrderCount, CashbackAmount, CouponUsed from useraccount
+                                 where Tenure = '0' or Tenure = '1'")
+
+dataHighTenure = dbGetQuery(con, "select Complain, OrderCount, CashbackAmount, CouponUsed from useraccount
+                                  where Tenure != '0' and Tenure != '1' and Tenure != ''")
+```
+
+Сравним средние значения некоторых показателей в каждой из групп:
+
+- Наличие жалоб за последний месяц
+```{r}
+paste("Новые пользователи  =", round(mean(na.omit(as.numeric(dataLowTenure$Complain))), 3))
+paste("Старые пользователи =", round(mean(na.omit(as.numeric(dataHighTenure$Complain))), 3))
+```
+
+- Средние количество заказов
+```{r}
+paste("Новые пользователи  =", round(mean(na.omit(as.numeric(dataLowTenure$OrderCount))), 3))
+paste("Старые пользователи =", round(mean(na.omit(as.numeric(dataHighTenure$OrderCount))), 3))
+```
+
+- Средний размер кэшбэка
+```{r}
+paste("Новые пользователи  =", round(mean(na.omit(as.numeric(dataLowTenure$CashbackAmount))), 3))
+paste("Старые пользователи =", round(mean(na.omit(as.numeric(dataHighTenure$CashbackAmount))), 3))
+```
+
+- Количество использованных купонов
+```{r}
+paste("Новые пользователи  =", round(mean(na.omit(as.numeric(dataLowTenure$CouponUsed))), 3))
+paste("Старые пользователи =", round(mean(na.omit(as.numeric(dataHighTenure$CouponUsed))), 3))
+```
+
+Из выше приведенных данных видно, что у новых пользователей сильно меньше показатель среднего 
+количества заказов, что весьма логично. Также они, в среднем, меньше используют промокоды и получают меньше кэшбэка. Но самое главное отличие - среди новых пользователей значительно выше процент жалоб.
+Это как раз и может вызывать такой сильный отток среди новых пользователей.
+
+Остановимся на данном предположении и построим модель, которая будет предсказывать отток новых 
+(Tenure <= 1) пользователей.
+
+Для начала подготовим данные для построения модели, преобразовав типы колонок и убрав NA значения.
+
+```{r}
+dataLowTenure = dbGetQuery(con, "select * from useraccount
+                                 where Tenure = '0' or Tenure = '1'")
+
+dataLowTenure = dataLowTenure %>% mutate(Complain = as.factor(Complain),
+                                         Churn = as.factor(ifelse(Churn == '1', 'Yes', 'No')),
+                                         Tenure = as.numeric(Tenure),
+                                         PreferredLoginDevice = as.factor(PreferredLoginDevice),
+                                         PreferredPaymentMode = as.factor(PreferredPaymentMode),
+                                         HourSpendOnApp = as.numeric(HourSpendOnApp),
+                                         CouponUsed = as.numeric(CouponUsed),
+                                         OrderCount = as.numeric(OrderCount),
+                                         DaySinceLastOrder = as.numeric(DaySinceLastOrder)) %>%
+                                  na.omit()
+```
+
+
+Отключаемся от базы данных, она нам больше не пригодится в ходе дальнейшего поиска решения.
+```{r}
+dbDisconnect(con)
+```
+
+### Модель
+
+Разобьем данные о новых пользователях на тренировочную и тестовую выборки с соотношением 80 на 20 соответственно.
+
+```{r}
+set.seed(500)
+
+ind = createDataPartition(dataLowTenure$Churn, p = 0.8, list = F)
+train = dataLowTenure[ind,]
+test = dataLowTenure[-ind,]
+```
+
+На всякий случай построим 2 разные модели и выберем лучшую из них. В моделях будем использовать
+формулу исключающую поля CustomerID, CategoryID и Tenure так как они не несут смысловой
+важности в текущем контексте.
+
+Первая модель будет основана на дереве решений.
+
+```{r}
+tree.model = ctree(Churn~. -CustomerID - CategoryID - Tenure, data = train)
+```
+
+Посчитаем аccuracy на тестовой выборке.
+
+```{r}
+predTest = predict(tree.model, test, type="response")
+confusionMatrix(predTest, test$Churn)
+```
+
+Вторая модель будет основана на логистической регрессии.
+
+```{r}
+logreg = logistic_reg() %>% fit(Churn~. - CustomerID - CategoryID - Tenure, data = train)
+```
+
+Посчитаем accuracy на тестовой выборке.
+
+```{r}
+predlog = predict(logreg, test)
+confusionMatrix(predlog$.pred_class, test$Churn)
+```
+
+Как можно заметить, модель логистической регрессии определяет отток чуть точнее модели на дереве решений, поэтому будем использовать именно её в дальнейших предсказаниях.
+
+Посмотрим на значимость переменных в выбранной модели.
+
+```{r}
+imporatance = vi(logreg) %>% arrange(Importance)
+
+plot_ly(alpha = 0.6) %>%
+  add_bars(y = ~Variable, x = ~Importance, data = imporatance, 
+           name = "Varaibles", orientation = 'h',
+           marker = list(color='rgb(86, 180, 233)')) %>%
+  layout(barmode = "overlay",
+         yaxis = list(title = "Переменные",
+         categoryorder = "array",
+         categoryarray = ~n),
+         xaxis = list(title = "Важность в модели"))
+```
+
+Как можно увидеть из графика, переменная Complain, отвечающая за наличие жалобы у пользователей,
+действительно имеет большое значение в предсказании оттока.
+
+Рассмотрим связь жалоб и ухода пользователей, построив график.
+
+```{r}
+ggplotly(
+  ggplot(dataLowTenure, aes(x = Complain, fill = Churn)) + 
+    geom_bar(color = "black") +
+    labs(title = "Отношение оттока и жалоб", 
+         x = "Пользователь жаловался",
+         y = "Количество пользователей",
+         fill = "Ушёл") +
+    scale_fill_manual(values=c("gray", "skyblue"), labels = c("Нет", "Да")) +
+    scale_x_discrete(labels = c("Нет", "Да")) +
+    theme_light()
+) %>%
+  layout(
+    showlegend = TRUE,
+    legend = list(
+      traceorder = "normal",
+      title = list(text = "Ушёл"),
+      orientation = "v",
+      y = 0.5,
+      xanchor = "left",
+      yanchor = "middle"
+    )
+  )
+```
+
+Можно заметить, что среди тех, кто оставлял жалобу в данном интернет-магазине, очень большое
+количество (~75%) перестало пользоваться сервисом. В то время как среди пользователей без жалоб 
+процент оттока значительно меньше (~40%).
+
+Попробуем сосредоточиться на тех, кто оставлял жалобы и в итоге ушёл.
+
+### Симуляция
+
+Для решения проблемы оттока пользователей из-за жалоб интернет-магазин решил провести компанию 
+по улучшению работы технической поддержки. Симулируем это, предположив, что улучшенная система 
+поддержки будет лучше справляться с решением пользовательских проблем и будет выдавать в 
+качестве извинения промокоды и повышенный кэшбэк.
+
+Симуляция улучшения работы тех. поддержки будет заключатся в том, что с вероятностью 40% удалось
+решить пользовательскую проблему, а также выдать купоны и повысить кэшбэк.
+
+Создадим копию тестового датасета.
+
+```{r}
+test2 = test
+```
+
+Добавляем все пользователям купоны и увеличиваем кэшбэк независимо от того, получилось ли
+решить их проблему.
+
+```{r}
+test2$CashbackAmount[test2$Complain == "1"] = as.integer(test2$CashbackAmount[test2$Complain == "1"] * 1.2)
+test2$CouponUsed[test2$Complain == "1"] = test2$CouponUsed[test2$Complain == "1"] + 2
+```
+
+Симулируем попытку решения пользовательской проблемы с вероятность 40%.
+
+```{r}
+test2$Complain[test2$Complain == "1"] = 
+  sample(c("1", "0"), 
+         size = length(test2$Complain[test2$Complain == "1"]),
+         replace = T, prob = c(0.6, 0.4))
+```
+
+Далее считаем предсказание на симуляции.
+
+```{r}
+simChurn = predict(logreg, test2)$.pred_class
+```
+
+Визуализируем полученное предсказание, сравнивая со старыми значениями.
+
+```{r}
+simChurn = data.frame(simChurn) %>% group_by(simChurn) %>% 
+  summarise(n = length(simChurn)) %>%
+  mutate(title = simChurn, sim = "После")
+curChurn = test %>% group_by(Churn) %>% 
+  summarise(n = length(Churn)) %>%
+  mutate(title = Churn, sim = "До")
+
+data = curChurn %>% bind_rows(simChurn) %>% select(-Churn, -simChurn) %>%
+  mutate(sim = as.factor(sim))
+
+sharedData = SharedData$new(data)
+bscols(
+  widths = c(3,NA),
+  filter <- filter_select("status",
+                        "До или после симуляции",
+                        sharedData,
+                        ~sim,
+                        multiple = FALSE),
+  plot_ly(sharedData) %>%
+  add_bars(y = ~n, x = ~title, name = "После",
+    orientation = 'v',
+    marker = list(color = "green",
+                  line = list(color = 'black', width = 1)),
+    opacity = 0.5,
+    transforms = list(list(type = "filter",
+                           target = ~sim,
+                           operation = "=",
+                           value = "После"))) %>%
+  add_bars(y = ~n, x = ~title, name = "До",
+    orientation = 'v',
+    marker = list(color = "red",
+                  line = list(color = 'black', width = 1)),
+    opacity = 0.5,
+    transforms = list(list(type = "filter",
+                           target = ~sim,
+                           operation = "=",
+                           value = "До"))) %>%
+  layout(
+    barmode = "group",
+    yaxis = list(title = "Количество клиентов"),
+    xaxis = list(title = "Клиент ушёл"))
+)
+```
+
+Как можно увидеть из графика, симулированной политикой нам удалось сохранить примерно 20-30% 
+пользователей, которые собирались уходить с данной платформы.
+
+### Дэшборд
+
+В дэшборде, в первую очередь, представлена информация о симуляции решения проблемы. Графики
+нагляднее всего показывают эффективность представленного решения. Также в дэшборд добавлена иллюстрация
+процента пользователей, которых удалось сохранить, в виде числового значения.
+
+В дополнение к информации о симуляции в дэшборд вынесен график, показывающий статистику использования
+интернет-магазина по времени с иллюстрацией ухода пользователей, и график, демонстрирующий 
+соотношение жалоб среди новых пользователей и последующего ухода.
+
+Вся выше перечисленная информация помогает наглядно понять смысл исследования и кратко проследить его ход.
+Полученный дэшборд можно использовать для демонстрации результатов анализа оттока пользователей начальству интернет-магазина. 
+
+## Общие выводы
+
+
+В ходе проведенного анализа оттока пользователей интернет-магазина были выявлены несколько ключевых моментов.
+
+Во-первых, процент оттока в представленном интернет-магазине составляет около 16%. При этом
+подавляющее большинство пользователей прекращают пользоваться сервисом либо почти сразу, либо спустя месяц
+после регистрации.
+
+Во-вторых, в процессе анализа оттока новых клиентов выяснилось, что основной причиной их ухода является
+наличие жалоб. Около 75 процентов новых пользователей, оставивших жалобы за последний месяц,
+в итоге перестали пользоваться интернет-магазином.
+
+Для решения проблемы оттока новых пользователей было выдвинуто предложение об усовершенствовании работы
+технической поддержки сайта. Его суть заключалась в улучшении способностей технической поддержки решать
+вопросы пользователей и предоставлять, в качестве извинения, промокоды и повышенный кэшбэк тем, кто
+столкнулся с проблемами.
+
+После проведения симуляции данной компании удалось сохранить от 20 до 30 процентов (в зависимости
+от случайности разбиения) пользователей, которые собирались уходить.
+
+Подводя итог, могу с уверенностью сказать, что данному интернет-магазину стоит сосредоточиться
+на привлечении и удержании новых пользователей, а также поработать над улучшением работы технической поддержки во избежание большого количества жалоб от пользователей.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
